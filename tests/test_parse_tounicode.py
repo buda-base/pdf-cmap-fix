@@ -95,6 +95,30 @@ endcmap
     assert d == {1: "\u0F42\u0FB7"}
 
 
+def test_bfchar_quartz_spaced_hex_destinations() -> None:
+    """macOS Quartz writes spaces inside a multi-codepoint hex string."""
+    cmap = b"""begincmap
+2 beginbfchar
+<21><0f04 0f05>
+<6f><0f7c 0f7e>
+endbfchar
+endcmap
+"""
+    d = _parse_tounicode(cmap)
+    assert d == {0x21: "\u0f04\u0f05", 0x6f: "\u0f7c\u0f7e"}
+
+
+def test_bfrange_array_quartz_spaced_hex_destinations() -> None:
+    cmap = b"""begincmap
+1 beginbfrange
+<0020> <0021> [<0f04 0f05> <0f7c 0f7e>]
+endbfrange
+endcmap
+"""
+    d = _parse_tounicode(cmap)
+    assert d == {0x20: "\u0f04\u0f05", 0x21: "\u0f7c\u0f7e"}
+
+
 def test_bfrange_with_huge_span_is_silently_dropped() -> None:
     """Sanity check: a malformed range whose span exceeds 0x10000 is ignored.
 

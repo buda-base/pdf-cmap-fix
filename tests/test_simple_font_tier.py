@@ -50,6 +50,19 @@ def test_build_tounicode_type0_is_unchanged_by_simple_addition() -> None:
     assert "<0123>" in out
 
 
+def test_build_tounicode_omits_empty_destinations() -> None:
+    """A failed parse must not be rewritten as an explicit empty mapping."""
+    simple = _build_tounicode_simple({0x6F: "", 0x6E: "ཨ"}).decode("latin-1")
+    assert "<6E>" in simple
+    assert "<6F>" not in simple
+    assert "<>" not in simple
+
+    type0 = _build_tounicode_type0({0x6F: "", 0x6E: "ཨ"}).decode("latin-1")
+    assert "<006E>" in type0
+    assert "<006F>" not in type0
+    assert "<>" not in type0
+
+
 # ---------------------------------------------------------------------------
 # _resolve_db_code_map_simple: gname tier
 # ---------------------------------------------------------------------------

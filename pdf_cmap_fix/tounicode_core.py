@@ -725,7 +725,13 @@ def _load_lookup_file_cached(path: Path) -> Optional[Tuple[str, dict[str, str]]]
 
 
 def _hex_to_unicode(hex_str: str) -> str:
-    """Decode an even-length hex string as a UTF-16-BE unicode value."""
+    """Decode a PDF hex string as UTF-16-BE.
+
+    Whitespace inside ``<...>`` is ignored (PDF 1.7 §7.3.4.3). Quartz
+    writes ``<0f04 0f05>``; counting those spaces made even-codepoint
+    destinations an odd length, a bogus ``0`` pad, and an empty parse.
+    """
+    hex_str = "".join(hex_str.split())
     if not hex_str:
         return ""
     if len(hex_str) % 2 == 1:
@@ -857,6 +863,7 @@ def _build_tounicode_type0(mapping: dict) -> bytes:
     entries = [
         f"<{gid:04X}> <{''.join(f'{ord(c):04X}' for c in uni)}>"
         for gid, uni in sorted(mapping.items())
+        if uni
     ]
     lines = [
         "/CIDInit /ProcSet findresource begin",
@@ -890,12 +897,14 @@ def _build_tounicode_simple(mapping: dict) -> bytes:
 
     Any mapping key outside ``0..255`` is silently dropped: simple
     fonts cannot reference it from the content stream anyway.
+    Empty destinations are omitted so a failed parse cannot rewrite a
+    working CMap entry as ``<>``.
     """
 
     entries = [
         f"<{cc:02X}> <{''.join(f'{ord(c):04X}' for c in uni)}>"
         for cc, uni in sorted(mapping.items())
-        if 0 <= cc <= 0xFF
+        if uni and 0 <= cc <= 0xFF
     ]
     lines = [
         "/CIDInit /ProcSet findresource begin",
