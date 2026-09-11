@@ -43,8 +43,27 @@ _HG_NAME_RE = re.compile(
     r"(?:JBHGZWHZ|JBHGZWBZ|ZWBZ|FHYW\d*|FHZW\d*)",
     re.IGNORECASE,
 )
+# HuaGuang English / Chinese symbol libraries (FHYW*, FHZW*). Distiller
+# writes their GB slots as CJK ToUnicode; Hg2Uni then turns page numbers
+# into stacked letters and dotted leaders into U+0F45. Confirmed on the
+# Tsongkhapa TOC (visual "(1)" / leader dots) and Rongtha FHYW1-B0 /
+# FHZW1-B0 glyph names.
+_HG_SYMBOL_RE = re.compile(r"(?:FHYW\d*|FHZW\d*)", re.IGNORECASE)
 _PLANE_RE = re.compile(r"[._-]([0-9A-Fa-f]{2})$")
 _TRAIL_RE = re.compile(r"^L([0-9A-Fa-f]{2})$", re.IGNORECASE)
+
+# FHYW1 plane B0: ASCII digits and the punctuation used as TOC page refs.
+_FHYW_TRAIL: dict[int, str] = {
+    0xC9: "(",
+    0xCA: ")",
+    0xCE: "-",
+}
+_FHYW_TRAIL.update({0xD1 + i: str(i) for i in range(10)})
+
+# FHZW1 plane B0: filled TOC leader dot (one glyph, repeated).
+_FHZW_TRAIL: dict[int, str] = {
+    0xA5: "\u00b7",
+}
 
 
 def _strip_subset_prefix(name: str) -> str:
@@ -54,6 +73,11 @@ def _strip_subset_prefix(name: str) -> str:
 def is_huaguang_font(name: str) -> bool:
     """True for HuaGuang / Founder plane faces and Distiller companions."""
     return bool(name) and _HG_NAME_RE.search(_strip_subset_prefix(name)) is not None
+
+
+def is_huaguang_symbol_font(name: str) -> bool:
+    """True for FHYW* (English symbols) and FHZW* (Chinese symbols)."""
+    return bool(name) and _HG_SYMBOL_RE.search(_strip_subset_prefix(name)) is not None
 
 
 def plane_from_font_name(name: str) -> Optional[int]:
@@ -117,7 +141,29 @@ def lookup(lead: int, trail: int) -> Optional[str]:
     return None
 
 
-def from_cjk_char(text: str) -> Optional[str]:
+def lookup_symbol(basename: str, lead: int, trail: int) -> Optional[str]:
+    """Map a FHYW/FHZW (lead, trail) pair to ASCII / punctuation.
+
+    Only the slots attested in the Founder/Distiller books are listed;
+    unknown symbol slots stay unmapped (do *not* fall back to Hg2Uni).
+    """
+    if not is_huaguang_symbol_font(basename):
+        return None
+    base = _strip_subset_prefix(basename).upper()
+    if "FHYW" in base:
+        return _FHYW_TRAIL.get(trail)
+    if "FHZW" in base:
+        return _FHZW_TRAIL.get(trail)
+    return None
+
+
+def _lookup_for_font(basename: str, lead: int, trail: int) -> Optional[str]:
+    if is_huaguang_symbol_font(basename):
+        return lookup_symbol(basename, lead, trail)
+    return lookup(lead, trail)
+
+
+def from_cjk_char(text: str, font_name: str = "") -> Optional[str]:
     """Decode Distiller ToUnicode CJK (GB-encoded HuaGuang pair) to Tibetan.
 
     Each character is encoded as GBK; a 2-byte result is treated as a
@@ -134,7 +180,7 @@ def from_cjk_char(text: str) -> Optional[str]:
             return None
         if len(raw) != 2:
             return None
-        uni = lookup(raw[0], raw[1])
+        uni = _lookup_for_font(font_name, raw[0], raw[1])
         if not uni:
             return None
         parts.append(uni)
@@ -154,21 +200,24 @@ def tounicode_from_plane_encoding(
         trail = trail_from_glyph_name(gname)
         if trail is None:
             continue
-        uni = lookup(lead, trail)
+        uni = _lookup_for_font(basename, lead, trail)
         if uni:
             out[int(code)] = uni
     return out or None
 
 
-def tounicode_from_cjk_map(existing: dict[int, str]) -> Optional[dict[int, str]]:
-    """Remap a Distiller CJK ToUnicode through the HuaGuang table."""
+def tounicode_from_cjk_map(
+    existing: dict[int, str],
+    font_name: str = "",
+) -> Optional[dict[int, str]]:
+    """Remap a Distiller CJK ToUnicode through the HuaGuang / symbol table."""
     if not existing:
         return None
     out: dict[int, str] = {}
     for code, val in existing.items():
         if not val:
             continue
-        uni = from_cjk_char(val)
+        uni = from_cjk_char(val, font_name)
         if uni:
             out[int(code)] = uni
     return out or None

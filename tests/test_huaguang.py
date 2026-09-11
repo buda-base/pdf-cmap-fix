@@ -84,62 +84,78 @@ def test_cjk_map_skips_non_gb() -> None:
     assert got == {1190: KA}
 
 
+def test_symbol_fonts_are_not_hg2uni() -> None:
+    assert hg.is_huaguang_symbol_font("INDLBK+FHYW1")
+    assert hg.is_huaguang_symbol_font("QHZGIC+FHYW1-B0")
+    assert hg.is_huaguang_symbol_font("INDLCK+FHZW1")
+    assert not hg.is_huaguang_symbol_font("INDKPI+JBHGZWHZ")
+    # Page-number slots: B0D1..B0DA = 0-9, B0C9/B0CA = (), B0CE = -.
+    assert hg.lookup_symbol("FHYW1", 0xB0, 0xD1) == "0"
+    assert hg.lookup_symbol("FHYW1", 0xB0, 0xD2) == "1"
+    assert hg.lookup_symbol("FHYW1", 0xB0, 0xDA) == "9"
+    assert hg.lookup_symbol("FHYW1", 0xB0, 0xC9) == "("
+    assert hg.lookup_symbol("FHYW1", 0xB0, 0xCA) == ")"
+    assert hg.lookup_symbol("FHYW1", 0xB0, 0xCE) == "-"
+    assert hg.lookup_symbol("FHZW1", 0xB0, 0xA5) == "\u00b7"
+    # Must not fall back to the Tibetan body table (B0A5 = U+0F45).
+    assert hg.lookup_symbol("FHZW1", 0xB0, 0xA5) != hg.lookup(0xB0, 0xA5)
+    # 哎 (GBK B0A5) through the symbol font is a leader, not ཅ.
+    assert hg.from_cjk_char("\u54ce", "FHZW1") == "\u00b7"
+    assert hg.from_cjk_char("\u54ce", "JBHGZWHZ") == "\u0f45"
+
+
 def test_map_has_tibetan_rejects_cjk_only_gid_dump() -> None:
     assert _map_has_tibetan({1: KA, 2: TSEK}) is True
     assert _map_has_tibetan({1: CJK_A, 2: "\u51b2", 3: "\ue27f"}) is False
     assert _map_has_tibetan({}) is False
 
 
-@_needs_tsong
-def test_tsongkhapa_distiller_cjk_becomes_tibetan() -> None:
-    doc = fitz.open(str(TSONGKHAPA))
+def _patched_page_text(path: Path) -> tuple[str, list[dict]]:
+    doc = fitz.open(str(path))
     try:
-        records, stats = collect_font_merges(doc)
-        assert stats["patched"] > 0
-        by_name = {r["pdf_font_name"]: r for r in records}
-        jbhg = next(r for n, r in by_name.items() if "JBHGZWHZ" in n)
-        assert jbhg["db_name_matched"] == "huaguang"
-        assert jbhg["changed"] > 0
+        assert len(doc) == 1
+        records, _ = collect_font_merges(doc)
         apply_font_merges_to_doc(doc, records)
         data = doc.tobytes(garbage=2, deflate=True)
     finally:
         doc.close()
-
     reopened = fitz.open(stream=data, filetype="pdf")
     try:
         text = reopened.load_page(0).get_text()
     finally:
         reopened.close()
+    return text, records
 
+
+@_needs_tsong
+def test_tsongkhapa_page_recovers_table_of_contents() -> None:
+    """One-page Distiller excerpt: CJK ToUnicode -> Tibetan via GBK + Hg2Uni."""
+    text, records = _patched_page_text(TSONGKHAPA)
+    assert records
+    assert all(r["db_name_matched"] == "huaguang" for r in records)
     # Distiller laid དཀར་ / ཆག on two lines.
     assert "\u0f51\u0f40\u0f62\u0f0b" in text
     assert "\u0f46\u0f42" in text
     assert "\u0f59\u0f7c\u0f44\u0f0b\u0f41\u0f0b\u0f54" in text  # tsong kha pa
-    assert "\u0f56\u0fb3\u0f7c\u0f0b\u0f56\u0f5f\u0f44" in text  # blo bzang
+    assert "\u0f56\u0fb3\u0f7c\u0f0b\u0f56\u0f5f\u0f44\u0f0b\u0f42\u0fb2\u0f42\u0f66" in text
+    # FHYW1 page numbers and FHZW1 leaders, not Hg2Uni letter soup.
+    assert "(1)" in text
+    assert "(11)" in text
+    assert "(44)" in text
+    assert "\u00b7\u00b7" in text
+    assert "\u0f51\u0f7a\u0f61\u0f7a\u0f53\u0f7a" not in text
     assert CJK_A not in text
     assert "\u77ee" not in text  # 矮
 
 
 @_needs_rongtha
-def test_rongtha_founder_planes_are_not_ededris() -> None:
-    doc = fitz.open(str(RONGTHA))
-    try:
-        records, stats = collect_font_merges(doc)
-        assert stats["patched"] > 0
-        for r in records:
-            assert r["db_name_matched"] == "huaguang"
-            assert "Ededris" not in (r.get("db_key_matched") or "")
-        apply_font_merges_to_doc(doc, records)
-        data = doc.tobytes(garbage=2, deflate=True)
-    finally:
-        doc.close()
-
-    reopened = fitz.open(stream=data, filetype="pdf")
-    try:
-        text = reopened.load_page(1).get_text()
-    finally:
-        reopened.close()
-
+def test_rongtha_page_recovers_volume_title() -> None:
+    """One-page Founder excerpt: plane fonts JBHGZWHZ.B* + Lxx names."""
+    text, records = _patched_page_text(RONGTHA)
+    assert records
+    assert all(r["db_name_matched"] == "huaguang" for r in records)
+    assert all("Ededris" not in (r.get("db_key_matched") or "") for r in records)
     assert YIG_MGO in text
-    assert ("\u0f56\u0f40\u0f60" in text) or ("\u0f62\u0f9b\u0f7a" in text)
-    assert "\ue000" not in text
+    assert "\u0f62\u0f7c\u0f44\u0f0b\u0f50\u0f0b" in text  # rong tha
+    assert "\u0f56\u0fb3\u0f7c\u0f0b\u0f56\u0f5f\u0f44\u0f0b\u0f46\u0f7c\u0f66\u0f0b\u0f60\u0f56\u0fb1\u0f7c\u0f62" in text
+    assert "\u0f42\u0f66\u0f74\u0f44\u0f0b\u0f60\u0f56\u0f74\u0f58" in text  # gsung 'bum

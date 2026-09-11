@@ -1043,7 +1043,7 @@ def _huaguang_tounicode(
         if plane_map:
             return plane_map, "huaguang"
     if existing:
-        cjk_map = hg.tounicode_from_cjk_map(existing)
+        cjk_map = hg.tounicode_from_cjk_map(existing, basename)
         if cjk_map:
             return cjk_map, "huaguang"
     return None
