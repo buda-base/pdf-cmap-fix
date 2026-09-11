@@ -11,7 +11,8 @@ Primary use case: **Tibetan stacked syllables** (Monlam, Himalaya, Jomolhari fon
 
 1. **Build a GID→Unicode map offline** from the source font's `cmap` table and GSUB ligature rules. Each stacked syllable glyph is decomposed back to its Unicode components. Maps are stored as `pdf_cmap_fix/data/font_lookup/<key>.json` (~970 fonts shipped with the package).
 2. **Match the PDF font** by normalising the embedded font name to a lookup key, then merge the correct Unicode strings into the font's `/ToUnicode` stream.
-3. **Extract or patch.** The patched text matches what renders on screen.
+3. **HuaGuang / Founder books** (`JBHGZWHZ.B6`, Distiller CJK ToUnicode, …) are decoded through UTFC's `Hg2Uni.tbl` instead of the GID/shape path (those lookups have no Tibetan and false-positive as Ededris).
+4. **Extract or patch.** The patched text matches what renders on screen.
 
 ---
 

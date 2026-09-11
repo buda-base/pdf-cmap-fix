@@ -39,6 +39,7 @@ pdf_cmap_fix = [
     "data/pytiblegenc/*.csv",
     "data/pytiblegenc/glyph_shape_db.npz",
     "data/pytiblegenc/glyph_shape_fonts.json",
+    "data/huaguang/*",
 ]
 
 [tool.pytest.ini_options]

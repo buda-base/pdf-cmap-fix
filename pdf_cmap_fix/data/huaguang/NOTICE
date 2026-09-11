@@ -1,0 +1,7 @@
+Hg2Uni.tbl is the HuaGuang → Unicode mapping table from the Universal
+Tibetan Font Converter (UTFC), Copyright 2003-2008 Trace Foundation,
+licensed under the GNU General Public License 3.0.
+
+Source: https://github.com/tracefoundation/UTFC/blob/master/Hg2Uni.tbl
+Index formula (Converter.c): 94 * (lead - 0xB0) + (trail_dos - 0x21).
+HuaGuang Windows trail bytes are DOS + 0x80.

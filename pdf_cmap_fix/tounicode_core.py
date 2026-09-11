@@ -964,6 +964,17 @@ def _has_tibetan(s: str) -> bool:
     return any(lo <= ord(c) <= hi for c in s)
 
 
+def _map_has_tibetan(db_map: dict) -> bool:
+    """True when any value in a lookup map contains Tibetan script.
+
+    The shipped ``jbhgzwhz`` GID dump is a cmap of a non-Unicode HuaGuang
+    face: every value is CJK/PUA, none is ``U+0Fxx``. Applying it cannot
+    recover Tibetan and will overwrite Distiller's GB-as-CJK ToUnicode
+    with a different CJK soup.
+    """
+    return any(v and _has_tibetan(v) for v in db_map.values())
+
+
 def _unicode_from_uni_glyph_name(gname: str) -> Optional[str]:
     """Decode an explicit ``uniXXXX`` / ``uXXXXX`` glyph name to Tibetan.
 
@@ -1007,6 +1018,35 @@ def _tounicode_from_embedded_uni_names(
             continue
         db_map[code] = uni
     return db_map or None
+
+
+def _huaguang_tounicode(
+    doc: fitz.Document,
+    xref: int,
+    basename: str,
+    *,
+    is_type0: bool,
+    existing: dict,
+) -> Optional[tuple[dict[int, str], str]]:
+    """Recover Tibetan for a HuaGuang / Founder plane font.
+
+    Returns ``(db_map, "huaguang")`` or ``None`` when the face is not
+    HuaGuang or the table cannot decode any slot.
+    """
+    from pdf_cmap_fix import huaguang as hg
+
+    if not hg.is_huaguang_font(basename):
+        return None
+    if not is_type0:
+        encoding = resolve_simple_encoding(doc, xref)
+        plane_map = hg.tounicode_from_plane_encoding(basename, encoding)
+        if plane_map:
+            return plane_map, "huaguang"
+    if existing:
+        cjk_map = hg.tounicode_from_cjk_map(existing)
+        if cjk_map:
+            return cjk_map, "huaguang"
+    return None
 
 
 def _gid_map_corroborated(
@@ -1347,7 +1387,14 @@ def _legacy_tounicode_from_scratch(
     Returns ``(db_map, matched_font_name)`` or ``None`` when the font is not a
     recoverable legacy face.
     """
+    from pdf_cmap_fix import huaguang as hg
     from pdf_cmap_fix import pytiblegenc_tables as ptg
+
+    # HuaGuang faces are GB-encoded, not Ededris/Chogyal. Shape matching
+    # votes them as Ededris-a / TibetanChogyal and remaps Lxx / CJK slots
+    # into stacked-Sanskrit soup. The dedicated HuaGuang path runs first.
+    if hg.is_huaguang_font(basename):
+        return None
 
     # Resolve the per-font conversion table: by name first, else by hashing the
     # embedded outlines (handles obfuscated PostScript names). Non-legacy faces
@@ -1520,6 +1567,74 @@ def collect_font_merges(
             # only key set available when synthesising a ToUnicode below.
             referenced = referenced_by_xref.get(xref)
 
+            # HuaGuang (华光) / Founder plane fonts: 2-byte GB-style slots, not
+            # the Ededris/Chogyal single-byte tables. Handle them before GID
+            # name matching (the shipped jbhgzwhz dump has no Tibetan) and
+            # before CFF shape matching (which votes these faces as Ededris).
+            hg_built = _huaguang_tounicode(
+                doc, xref, basename, is_type0=is_type0, existing=existing
+            )
+            if hg_built is not None:
+                db_map, matched_name = hg_built
+                if not existing:
+                    if verbose:
+                        norm = _normalise_name(basename)
+                        if norm not in reported:
+                            reported.add(norm)
+                            print(
+                                f"  [created] {basename[:50]} -> {matched_name}  "
+                                f"[huaguang]  ({ftype})"
+                            )
+                    records.append(
+                        {
+                            "font_xref": xref,
+                            "to_unicode_xref": None,
+                            "pdf_font_name": basename,
+                            "pdf_font_type": ftype,
+                            "db_key_matched": matched_name,
+                            "db_name_matched": matched_name,
+                            "existing": {},
+                            "merged": db_map,
+                            "overrides": dict(db_map),
+                            "changed": len(db_map),
+                        }
+                    )
+                    stats["patched"] += 1
+                    stats["upgrades"] += len(db_map)
+                    continue
+                if not referenced:
+                    referenced = set(existing.keys())
+                merged, changed = _merge(existing, db_map, referenced)
+                overrides = _overrides(existing, merged)
+                if verbose:
+                    norm = _normalise_name(basename)
+                    if norm not in reported:
+                        reported.add(norm)
+                        print(
+                            f"  [matched] {basename[:50]} -> {matched_name}  "
+                            f"[huaguang]  ({ftype})"
+                        )
+                records.append(
+                    {
+                        "font_xref": xref,
+                        "to_unicode_xref": tu_xref,
+                        "pdf_font_name": basename,
+                        "pdf_font_type": ftype,
+                        "db_key_matched": matched_name,
+                        "db_name_matched": matched_name,
+                        "existing": existing,
+                        "merged": merged,
+                        "overrides": overrides,
+                        "changed": changed,
+                    }
+                )
+                if changed:
+                    stats["patched"] += 1
+                    stats["upgrades"] += changed
+                else:
+                    stats["no_change"] += 1
+                continue
+
             # A legacy Tibetan font (Ededris/Dedris, TibetanChogyal, ...)
             # frequently ships *no* ToUnicode at all, so the remap pipeline below
             # has nothing to work with and the font would be silently skipped.
@@ -1586,7 +1701,13 @@ def collect_font_merges(
             # tier to a sparse same-named lookup). Cheap name-based resolution
             # only; the outline fallback (which loads the embedded program) runs
             # below as a last resort.
-            ptg_eligible = (is_simple or is_type0) and bool(existing)
+            from pdf_cmap_fix import huaguang as hg
+
+            ptg_eligible = (
+                (is_simple or is_type0)
+                and bool(existing)
+                and not hg.is_huaguang_font(basename)
+            )
             if ptg_eligible:
                 ptg_map = _pytiblegenc_name_map(embedded_names, basename, existing)
                 if ptg_map is not None:
@@ -1649,6 +1770,9 @@ def collect_font_merges(
             # already has. Only the gid tier needs this: gname / gshape resolve
             # through the embedded font, and ptg only fires on legacy fonts.
             rejected_gid_map = False
+            if db_map is not None and match_kind == "gid" and not _map_has_tibetan(db_map):
+                db_map, db_key, matched_display = None, None, None
+                rejected_gid_map = True
             if (
                 db_map is not None
                 and match_kind == "gid"
