@@ -34,6 +34,8 @@ FONT_ALIASES = {
     "Ededris-syma": "Ededris-sym",
     "TibetanClassicSkt": "TibetanClassicSkt1",
     "TibetanChogyalSkt": "TibetanChogyalSkt1",
+    "TB-TTYoutso": "TB-Youtso",
+    "TB2-TTYoutso": "TB2-Youtso",
 }
 
 
@@ -49,8 +51,13 @@ def normalize_font_name(font_name: str, weight: Optional[str] = None) -> str:
         font_name = "Ed" + font_name[1:]
     if font_name.startswith("Sam") and len(font_name) == 4:
         font_name = "Es" + font_name[1:]
-    if font_name.endswith("Normal"):
-        font_name = font_name[:-6].strip()
+    # PostScript style names use a hyphenated weight suffix
+    # (``TB-Youtso-Normal``). Stripping the bare ``Normal`` tail left a
+    # dangling hyphen (``TB-Youtso-``) and missed the conversion table.
+    if font_name.endswith("-Normal") or font_name.endswith(" Normal"):
+        font_name = font_name[:-7].strip()
+    elif font_name.endswith("Normal"):
+        font_name = font_name[:-6].strip().rstrip("-").strip()
     if weight == "b":
         font_name += "Skt1"
     if weight == "i":

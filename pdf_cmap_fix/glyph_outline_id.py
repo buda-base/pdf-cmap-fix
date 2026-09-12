@@ -144,26 +144,33 @@ def identify_candidates(ttfont: "TTFont") -> List[str]:
     of all DB hashes, so a font with even one outline absent from the DB (any
     non-legacy font, e.g. Times/Arial) bails after a single glyph instead of
     hashing the whole program.
+
+    Corrupt or truncated embedded programs (a Distiller Wingdings subset with
+    a broken ``cmap`` format 4, …) must not abort the whole PDF — they simply
+    fail to identify.
     """
-    if "glyf" not in ttfont:
-        return []
-    index = _font_hash_index()
-    if not index:
-        return []
-    universe = _all_db_hashes()
-    H: set[str] = set()
-    for glyph_name in ttfont["glyf"].keys():
-        h = compute_glyph_hash(ttfont, glyph_name)
-        if h is None:
-            continue
-        if h not in universe:
+    try:
+        if "glyf" not in ttfont:
             return []
-        H.add(h)
-    if not H:
+        index = _font_hash_index()
+        if not index:
+            return []
+        universe = _all_db_hashes()
+        H: set[str] = set()
+        for glyph_name in ttfont["glyf"].keys():
+            h = compute_glyph_hash(ttfont, glyph_name)
+            if h is None:
+                continue
+            if h not in universe:
+                return []
+            H.add(h)
+        if not H:
+            return []
+        matches: list[tuple[int, str]] = []
+        for ps_name, db_hashes in index.items():
+            if H <= db_hashes:
+                matches.append((len(db_hashes), ps_name))
+        matches.sort(key=lambda t: (t[0], t[1]))
+        return [name for _, name in matches]
+    except Exception:
         return []
-    matches: list[tuple[int, str]] = []
-    for ps_name, db_hashes in index.items():
-        if H <= db_hashes:
-            matches.append((len(db_hashes), ps_name))
-    matches.sort(key=lambda t: (t[0], t[1]))
-    return [name for _, name in matches]

@@ -1125,9 +1125,29 @@ def _load_embedded_ttfont(
     if not buf or not isinstance(buf, (bytes, bytearray)):
         return None
     try:
-        return TTFont(io.BytesIO(bytes(buf)), lazy=False)
+        font = TTFont(io.BytesIO(bytes(buf)), lazy=False)
+        # Force cmap/post decompile now so a truncated Distiller subset
+        # (Wingdings cmap format 4, …) fails here instead of later in
+        # outline identification, which would abort the whole PDF.
+        font.getGlyphOrder()
+        return font
     except Exception:
         return None
+
+
+_SFNT_MAGICS = (b"\x00\x01\x00\x00", b"true", b"OTTO", b"typ1")
+
+
+def _embedded_buffer_is_sfnt(doc: fitz.Document, font_xref: int) -> bool:
+    """True when the embedded program looks like sfnt (TTF/OTF), not Type1."""
+    try:
+        tup = doc.extract_font(font_xref)
+    except Exception:
+        return False
+    if not tup or len(tup) < 4:
+        return False
+    buf = tup[3]
+    return bool(buf) and bytes(buf[:4]) in _SFNT_MAGICS
 
 
 def _build_ptg_db_map(
@@ -1413,9 +1433,20 @@ def _legacy_tounicode_from_scratch(
     # Shape-recovery result, computed at most once and reused for code recovery.
     shape_font: Optional[str] = None
     shape_map: Optional[dict[int, str]] = None
+    if name is None and ttfont is None and _embedded_buffer_is_sfnt(doc, xref):
+        # Embedded TrueType/OTF that we could not parse (corrupt cmap, …).
+        # Do not fall through to CFF shape matching.
+        return None
     if name is None:
         # TrueType glyf outlines -> exact hash identification.
-        if ttfont is not None and "glyf" in ttfont:
+        try:
+            has_glyf = ttfont is not None and "glyf" in ttfont
+        except Exception:
+            # Unreadable TrueType (corrupt cmap, …). Do not fall through to
+            # CFF shape matching — that path is for Type1 programs, and a
+            # broken Wingdings must not abort or be remapped as Ededris.
+            return None
+        if has_glyf:
             from pdf_cmap_fix.glyph_outline_id import identify_candidates
 
             name, _table = ptg.table_for_candidates(identify_candidates(ttfont))
@@ -1425,7 +1456,7 @@ def _legacy_tounicode_from_scratch(
         # not a vendored legacy face, and the bitmap matcher false-positives
         # large Latin subsets as Ededris-vowa (see tests for Optima / Lucida).
         if name is None:
-            is_truetype_glyf = ttfont is not None and "glyf" in ttfont and "CFF " not in ttfont
+            is_truetype_glyf = has_glyf and ttfont is not None and "CFF " not in ttfont
             if not is_truetype_glyf:
                 shape_font, shape_map = _recover_codes_from_shapes(
                     doc, xref, is_type0=is_type0, referenced=referenced
