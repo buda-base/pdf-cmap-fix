@@ -410,15 +410,13 @@ def _resolve_db_code_map_simple(
     PostScript glyph name. Once we know the glyph name we can use the
     same gname / gshape lookups Type0 paths already consume.
 
-    Tier 1 (``gid``) is intentionally not supported for simple fonts:
-    GIDs in Type1 CharStrings are font-local and not portable between
-    PDFs, so a single tier-1 entry could not be reused across
-    documents.
+    Tier 1 (``gid``) is applied only to a near-complete TrueType
+    embedding (see :func:`_resolve_simple_via_embedded_gids`). Subset
+    GIDs are font-local and not portable, so those stay empty here.
     """
 
     if lookup_kind == "gid":
-        # GID-based tier 1 is Type0-only by design (see docstring).
-        return {}
+        return _resolve_simple_via_embedded_gids(doc, font_xref, inner)
 
     code_to_gname = resolve_simple_encoding(doc, font_xref)
     if not code_to_gname:
@@ -469,6 +467,48 @@ def _resolve_db_code_map_simple(
             ext_font.close()
         except Exception:
             pass
+
+
+def _resolve_simple_via_embedded_gids(
+    doc: fitz.Document,
+    font_xref: int,
+    inner: dict[str, str],
+) -> dict[int, str]:
+    """Map simple-font char codes through the embedded TrueType's GIDs.
+
+    Safe only when the embedded program is a near-complete copy of the
+    lookup font (same glyph order). A per-page subset remaps GIDs, so we
+    refuse anything much smaller than the lookup. Himalaya-G in Ghostscript
+    PDFs is the motivating case: a 3000+ glyph embedding whose ``/Encoding``
+    uses PUA ``uniF00x`` names that neither gname nor ``uni0Fxx`` decode.
+    """
+    gid_map = _gid_map_from_inner(inner)
+    if not gid_map:
+        return {}
+    encoding = resolve_simple_encoding(doc, font_xref)
+    if not encoding:
+        return {}
+    ttfont = _load_embedded_ttfont(doc, font_xref)
+    if ttfont is None:
+        return {}
+    try:
+        order = ttfont.getGlyphOrder()
+    except Exception:
+        return {}
+    # Subsets (a few hundred glyphs) do not share the lookup's glyph order.
+    min_glyphs = max(1000, max(gid_map) // 2)
+    if len(order) < min_glyphs:
+        return {}
+    g2i = {name: i for i, name in enumerate(order)}
+    out: dict[int, str] = {}
+    for code, gname in encoding.items():
+        gid = g2i.get(gname)
+        if gid is None:
+            continue
+        uni = gid_map.get(gid)
+        if uni:
+            out[code] = uni
+    return out
 
 
 def _extract_font_names(doc: fitz.Document, font_xref: int) -> list[str]:
@@ -1029,6 +1069,45 @@ def _tounicode_from_embedded_uni_names(
     return db_map or None
 
 
+def _tounicode_from_bundled_gname(
+    doc: fitz.Document,
+    font_xref: int,
+    embedded_names: list[str],
+    basename: str,
+) -> Optional[tuple[dict[int, str], str, str, str]]:
+    """Last-resort simple-font match against the bundled gname lookup tree.
+
+    The default (gid) collector cannot key a per-page TrueType subset by GID.
+    Faces like ``MonlamUniOuChan2`` still carry ``tibKa`` / ``tibBa_Yata``
+    names that the gname tables know, so resolve those here without requiring
+    the caller to switch strategy.
+    """
+    lookup_dir = Path(__file__).resolve().parent / "data" / "font_lookup_gname"
+    if not lookup_dir.is_dir():
+        return None
+    db_index = _build_db_index(_discover_lookup_keys(lookup_dir))
+    # Exact normalised-name only. Fuzzy `_pick_best_font_key` score-1
+    # matches (``ma`` ⊂ ``tb1youtso``) would remap Latin companion faces.
+    picked = None
+    for cand in [*embedded_names, basename]:
+        norm = _normalise_name(cand)
+        if norm and norm in db_index:
+            picked = db_index[norm]
+            break
+    if picked is None:
+        return None
+    path = lookup_dir / f"{picked}.json"
+    if not path.is_file():
+        return None
+    loaded = _load_lookup_file_cached(path)
+    if loaded is None or loaded[0] != "gname":
+        return None
+    cand_map = _resolve_db_code_map_simple(doc, font_xref, "gname", loaded[1])
+    if not cand_map:
+        return None
+    return cand_map, picked, "gname", picked
+
+
 def _huaguang_tounicode(
     doc: fitz.Document,
     xref: int,
@@ -1485,29 +1564,50 @@ def _legacy_tounicode_from_scratch(
                         cp = int(m.group(1))
                         if 0 <= cp <= 0x10FFFF:
                             ch = chr(cp)
-                if not ch:
-                    continue
-                converted = ptg.convert_char(name, ch)
+                converted = ptg.convert_char(name, ch) if ch else None
                 if converted:
                     db_map[code] = converted
 
-    # Outline route: symbolic subsets with no usable /Encoding, and Type0 fonts.
-    if not db_map and ttfont is not None:
-        db_map = _recover_codes_from_outlines(
+    # Outline / shape routes fill codes the Encoding pass missed (symbolic
+    # subsets, custom glyph names, Type0). Always merge; do not skip just
+    # because a few Encoding slots already converted.
+    if ttfont is not None:
+        extra = _recover_codes_from_outlines(
             ttfont, name, is_type0=is_type0, referenced=referenced
         )
+        for code, uni in extra.items():
+            db_map.setdefault(code, uni)
 
-    # Shape route: CFF/Type1 outlines the glyf hash path above cannot read.
-    # Reuse the map already computed during identification when possible.
-    if not db_map:
-        if shape_map and shape_font == name:
-            db_map = shape_map
-        else:
+    if shape_map and shape_font == name:
+        for code, uni in shape_map.items():
+            db_map.setdefault(code, uni)
+    else:
+        try:
+            is_truetype_glyf = (
+                ttfont is not None and "glyf" in ttfont and "CFF " not in ttfont
+            )
+        except Exception:
+            is_truetype_glyf = False
+        if not is_truetype_glyf:
             sf, smap = _recover_codes_from_shapes(
                 doc, xref, is_type0=is_type0, referenced=referenced, font_hint=name
             )
             if smap:
-                db_map = smap
+                for code, uni in smap.items():
+                    db_map.setdefault(code, uni)
+
+    # Last: encoding *byte* as table key. Mangala / Chogyal Type1 names
+    # (``short_rta``, …) have no AGL char; the table is still keyed on the
+    # slot. Run after outlines/shapes so a Latin byte (``(`` → ཆ) cannot
+    # beat a real stack recovered from the glyph.
+    if not is_type0:
+        encoding = resolve_simple_encoding(doc, xref) or {}
+        for code, _gname in encoding.items():
+            if code in db_map or not (0 <= code <= 0xFF):
+                continue
+            converted = ptg.convert_char(name, chr(code))
+            if converted:
+                db_map[code] = converted
 
     if not db_map:
         return None
@@ -1531,14 +1631,13 @@ def collect_font_merges(
       char codes ARE GIDs; the merge happens on
       ``{GID -> Unicode}`` and the output ToUnicode stream uses a
       4-hex-digit codespace.
-    * **Type1, MMType1, TrueType (simple, single-byte)** -- new path,
-      enabled for ``gname`` and ``gshape`` lookup tiers only (tier 1
-      ``gid`` keys are GID-based and not portable across simple-font
-      subsets). PDF char codes go through the font's
-      ``/Encoding`` (predefined base + ``/Differences``) to a
-      PostScript glyph name, which is what the lookup keys on. The
-      merge happens on ``{char_code -> Unicode}`` and the output
-      ToUnicode stream uses a 2-hex-digit codespace.
+    * **Type1, MMType1, TrueType (simple, single-byte)** -- PDF char
+      codes go through the font's ``/Encoding`` to a PostScript glyph
+      name. ``gname`` / ``gshape`` key on that name. Tier-1 ``gid`` is
+      used only for a near-complete TrueType embedding (same glyph
+      order as the lookup); per-page subsets fall through to bundled
+      gname names or ``uni*`` cmap names. The merge is
+      ``{char_code -> Unicode}`` with a 2-hex-digit codespace.
 
     Type3 (procedural) fonts have no embedded font program and are
     silently skipped.
@@ -1832,6 +1931,12 @@ def collect_font_merges(
                     db_key = "embedded-uni-names"
                     match_kind = "uni-name"
                     matched_display = "embedded-uni-names"
+                else:
+                    gname_hit = _tounicode_from_bundled_gname(
+                        doc, xref, embedded_names, basename
+                    )
+                    if gname_hit is not None:
+                        db_map, db_key, match_kind, matched_display = gname_hit
 
             if db_map is None:
                 stats["no_match"] += 1

@@ -54,6 +54,30 @@ def test_table_for_tcrc_youtso_normal_still_resolves() -> None:
     assert table is not None
 
 
+def test_aliases_ttyoutso_bold_tcrc_and_chosgyal() -> None:
+    assert normalize_font_name("TB-TTYoutso-Bold") == "TB-Youtso"
+    assert normalize_font_name("TB2-TTYoutso-Bold") == "TB2-Youtso"
+    assert normalize_font_name("TCRCYoutso") == "TCRC Youtso"
+    assert normalize_font_name("TCRC-Bod-Yig") == "TCRC Bod-Yig"
+    assert normalize_font_name("TibetanChosGyalSkt2") == "TibetanChogyalSkt2"
+    name, table = table_for("TB-TTYoutso-Bold")
+    assert name == "TB-Youtso"
+    assert table is not None
+    assert table["<"] == "\u0f40\u0fb1"
+    name_c, table_c = table_for("TCRCYoutso")
+    assert name_c == "TCRC Youtso"
+    assert table_c is not None
+    name_s, table_s = table_for("TibetanChosGyalSkt1")
+    assert name_s == "TibetanChogyalSkt1"
+    assert table_s is not None
+    assert normalize_font_name("DzongkhaCalligraphic") == "TibetanCalligraphic"
+    assert normalize_font_name("DzongkhaCalligraphicSkt2") == "TibetanCalligraphicSkt2"
+    name_d, table_d = table_for("DzongkhaCalligraphic")
+    assert name_d == "TibetanCalligraphic"
+    assert table_d is not None
+    assert table_d["!"] == "\u0f40"
+
+
 def test_identify_candidates_corrupt_cmap_returns_empty() -> None:
     class _BrokenCmap:
         def __contains__(self, key: str) -> bool:

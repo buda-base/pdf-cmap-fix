@@ -36,6 +36,14 @@ FONT_ALIASES = {
     "TibetanChogyalSkt": "TibetanChogyalSkt1",
     "TB-TTYoutso": "TB-Youtso",
     "TB2-TTYoutso": "TB2-Youtso",
+    # Acrobat / PageMaker often embeds the Bold cut under the TTYoutso name.
+    # The dedicated TB-Youtso-Bold table is a sparse Sheja excerpt; these
+    # books use Bold as the body face with the Regular encoding, so map to
+    # the full Regular tables. Do not alias TB-Youtso-Bold itself.
+    "TB-TTYoutso-Bold": "TB-Youtso",
+    "TB2-TTYoutso-Bold": "TB2-Youtso",
+    "TCRCYoutso": "TCRC Youtso",
+    "TCRC-Bod-Yig": "TCRC Bod-Yig",
 }
 
 
@@ -51,6 +59,18 @@ def normalize_font_name(font_name: str, weight: Optional[str] = None) -> str:
         font_name = "Ed" + font_name[1:]
     if font_name.startswith("Sam") and len(font_name) == 4:
         font_name = "Es" + font_name[1:]
+    # Distiller writes ``TibetanChosGyalSkt2``; tables are ``TibetanChogyal*``.
+    if "ChosGyal" in font_name:
+        font_name = font_name.replace("ChosGyal", "Chogyal")
+    # Dzongkha Calligraphic shares the Tibetan Calligraphic encoding
+    # (identical attu tables).
+    if font_name.startswith("DzongkhaCalligraphic"):
+        font_name = "Tibetan" + font_name[len("Dzongkha") :]
+    # Tables use a space after the TCRC foundry (``TCRC Youtso``);
+    # PDFs often glue or hyphenate it (``TCRCYoutso``, ``TCRC-Bod-Yig``).
+    if font_name.startswith("TCRC") and len(font_name) > 4 and font_name[4] != " ":
+        rest = font_name[4:]
+        font_name = "TCRC " + rest[1:] if rest.startswith("-") else "TCRC " + rest
     # PostScript style names use a hyphenated weight suffix
     # (``TB-Youtso-Normal``). Stripping the bare ``Normal`` tail left a
     # dangling hyphen (``TB-Youtso-``) and missed the conversion table.

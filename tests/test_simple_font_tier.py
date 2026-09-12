@@ -109,7 +109,7 @@ def test_resolve_db_code_map_simple_gname_happy_path() -> None:
 
 
 def test_resolve_db_code_map_simple_gid_tier_returns_empty() -> None:
-    """Tier 1 (gid) is intentionally unsupported for simple fonts."""
+    """GID maps need an embedded TrueType; encoding-only Type1 stays empty."""
     doc = _doc_with_encoding(("name", "WinAnsiEncoding"))
     out = _resolve_db_code_map_simple(doc, 1, "gid", {"5": "X"})
     assert out == {}
