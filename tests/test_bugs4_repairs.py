@@ -119,12 +119,19 @@ def test_mstt_excerpt_uses_pdf_byte_reviewed_table() -> None:
 
 
 @pytest.mark.skipif(not CHENREZIG.is_file(), reason="ChosGyal excerpt not present")
-def test_chosgyal_is_left_unmodified_until_pdf_bytes_are_reviewed() -> None:
+def test_chosgyal_and_mangala_raw_bytes_recover_clean_text() -> None:
     recs = _records(CHENREZIG)
-    unsafe = [
-        r
-        for r in recs
-        if "TibetanChosGyal" in (r.get("pdf_font_name") or "")
-        or "TibetanMangala-Normal" in (r.get("pdf_font_name") or "")
-    ]
-    assert all(not r.get("db_name_matched") and not r.get("changed") for r in unsafe)
+    by = {r["db_name_matched"]: r for r in recs if r.get("db_name_matched")}
+    assert set(by) >= {
+        "TibetanMangala-Normal",
+        "TibetanChosGyalSkt1",
+        "TibetanChosGyalSkt2",
+        "TibetanChosGyalSkt3",
+    }
+    assert by["TibetanMangala-Normal"]["merged"][1] == "\u0f58"
+    assert by["TibetanChosGyalSkt2"]["merged"][1] == "\u0f56\u0fb7"
+    assert by["TibetanChosGyalSkt3"]["merged"][20] == "\u0f85"
+    text = _patched_text(CHENREZIG)
+    assert "\u0f58\u0f44\u0f0b\u0f50\u0f7c\u0f66\u0f0b\u0f56\u0fb3\u0f7c\u0f0b\u0f56\u0f5f\u0f44" in text
+    assert "\u0f66\u0fa4\u0fb1\u0f53\u0f0b\u0f62\u0f66\u0f0b\u0f42\u0f5f\u0f72\u0f42\u0f66" in text
+    assert not any(ord(ch) < 32 and ch not in "\n\t\r" for ch in text)

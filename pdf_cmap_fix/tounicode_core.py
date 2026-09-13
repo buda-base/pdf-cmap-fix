@@ -1253,10 +1253,20 @@ def _build_ptg_db_map(
     return db_map, name, match_kind, name
 
 
+def _ptg_table_uses_pdf_byte(name: str) -> bool:
+    """Whether a reviewed legacy table is keyed by the raw simple-font byte."""
+    return (
+        name.startswith("MSTT")
+        or name.startswith("TibetanChosGyal")
+        or name == "TibetanMangala-Normal"
+    )
+
+
 def _pytiblegenc_name_map(
     embedded_names: list[str],
     basename: str,
     existing: dict[int, str],
+    referenced: Optional[set] = None,
 ) -> Optional[tuple[dict[int, str], str, str, str]]:
     """Cheap name-based pytiblegenc match (no embedded-font I/O).
 
@@ -1268,6 +1278,15 @@ def _pytiblegenc_name_map(
     for cand in [*embedded_names, basename]:
         name, table = ptg.table_for(cand)
         if table is not None:
+            if _ptg_table_uses_pdf_byte(name):
+                db_map = {
+                    ord(ch): value
+                    for ch, value in table.items()
+                    if ord(ch) <= 0xFF and value
+                }
+                if db_map:
+                    return db_map, name, "ptg-raw-byte", name
+                continue
             return _build_ptg_db_map(name, existing, "ptg")
     return None
 
@@ -1504,12 +1523,15 @@ def _legacy_tounicode_from_scratch(
     if hg.is_huaguang_font(basename):
         return None
 
-    # These Chenrezig-era CFF subsets advertise Mangala / ChosGyal glyph
-    # names, but the PDF bytes render different outlines. Neither the nominal
-    # Mangala table nor Chogyal shape matching is a valid encoding map. Leave
-    # them untouched until a table has been reviewed from PDF-byte replay.
+    # These Chenrezig-era CFF subsets advertise misleading glyph names. Only
+    # an exact, PDF-byte-reviewed table is safe; do not fall back from
+    # TibetanMangala-Normal to TibetanMangala or shape-match ChosGyal as
+    # Chogyal.
     if "TibetanChosGyal" in basename or "TibetanMangala-Normal" in basename:
-        return None
+        bare_name = basename.split("+", 1)[-1]
+        matched_name, _ = ptg.table_for(basename)
+        if matched_name != bare_name:
+            return None
 
     # Resolve the per-font conversion table: by name first, else by hashing the
     # embedded outlines (handles obfuscated PostScript names). Non-legacy faces
@@ -1551,10 +1573,18 @@ def _legacy_tounicode_from_scratch(
         if name is None:
             return None
 
+    if _ptg_table_uses_pdf_byte(name) and _table is not None and not is_type0:
+        db_map = {
+            ord(ch): value
+            for ch, value in _table.items()
+            if ord(ch) <= 0xFF and value
+        }
+        return (db_map, name) if db_map else None
+
     db_map: dict[int, str] = {}
 
     # Encoding route (simple fonts only -- Type0 uses a CMap, not /Encoding).
-    if not is_type0 and not basename.startswith("MSTT"):
+    if not is_type0 and not _ptg_table_uses_pdf_byte(name):
         encoding = resolve_simple_encoding(doc, xref)
         if encoding:
             from fontTools.agl import toUnicode
@@ -1858,7 +1888,9 @@ def collect_font_merges(
                 and not hg.is_huaguang_font(basename)
             )
             if ptg_eligible:
-                ptg_map = _pytiblegenc_name_map(embedded_names, basename, existing)
+                ptg_map = _pytiblegenc_name_map(
+                    embedded_names, basename, existing, referenced
+                )
                 if ptg_map is not None:
                     db_map, db_key, match_kind, matched_display = ptg_map
 

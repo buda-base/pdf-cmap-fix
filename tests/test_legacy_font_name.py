@@ -74,9 +74,24 @@ def test_reviewed_ttyoutso_bold_tables_and_tcrc_aliases() -> None:
     assert table_c is not None
 
 
-def test_chosgyal_is_not_aliased_to_differently_encoded_chogyal() -> None:
+def test_chosgyal_and_mangala_normal_use_distinct_reviewed_tables() -> None:
     assert normalize_font_name("TibetanChosGyalSkt2") == "TibetanChosGyalSkt2"
-    assert table_for("TibetanChosGyalSkt1") == (None, None)
+    name, table = table_for("TibetanChosGyalSkt1")
+    assert name == "TibetanChosGyalSkt1"
+    assert table is not None
+    assert table[chr(1)] == "\u0f4a\u0f9a"
+    assert table[chr(20)] == "\u0f4a\u0fa4"
+    # Exact table lookup wins before -Normal suffix normalisation.
+    name_m, table_m = table_for("PJGNCA+TibetanMangala-Normal")
+    assert name_m == "TibetanMangala-Normal"
+    assert table_m is not None
+    assert table_m[chr(1)] == "\u0f58"
+    assert table_m[chr(3)] == "\u0f0b"
+    # The generic encoding remains untouched and materially different.
+    generic_name, generic = table_for("TibetanMangala")
+    assert generic_name == "TibetanMangala"
+    assert generic is not None
+    assert generic[chr(17)] != table_m[chr(17)]
 
 
 def test_dzongkha_calligraphic_alias() -> None:

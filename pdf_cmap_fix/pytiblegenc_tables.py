@@ -142,6 +142,12 @@ def table_for(font_name: str) -> Tuple[Optional[str], Optional[dict[str, str]]]:
     base = _base()
     rest = _strip_subset_prefix(font_name)
     while True:
+        # A reviewed PDF-specific face may intentionally coexist with the
+        # generic table that normalisation would otherwise select (for example
+        # TibetanMangala-Normal versus TibetanMangala).
+        table = base.get(rest)
+        if table is not None and len(rest) >= 4:
+            return rest, table
         norm = normalize_font_name(rest)
         table = base.get(norm)
         if table is not None and len(norm) >= 4:
