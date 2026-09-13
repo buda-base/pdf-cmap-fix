@@ -39,6 +39,16 @@ def test_tcrc_bod_yig_keeps_reviewed_ka_subscript() -> None:
     assert table["G"] == "\u0f42"
 
 
+def test_ttyoutso_bold_has_its_own_reviewed_encoding() -> None:
+    name, table = table_for("TB-TTYoutso-Bold")
+    assert name == "TB-TTYoutso-Bold"
+    assert table is not None
+    # These differ from the older TB-Youtso table.
+    assert table[chr(164)] == "\u0f58"
+    assert table[chr(184)] == "\u0f5f"
+    assert table[chr(186)] == "\u0f68"
+
+
 def _patched_text(path: Path) -> str:
     import fitz
 
@@ -73,7 +83,9 @@ def test_tcrc_excerpt_recovers_gri_gum_heading() -> None:
     by = {r["db_name_matched"]: r for r in records if r.get("db_name_matched")}
     assert "TCRC Youtso" in by
     assert "TCRC Bod-Yig" in by
+    assert "TB-TTYoutso-Bold" in by
     assert by["TCRC Youtso"]["changed"] > 0
+    assert by["TB-TTYoutso-Bold"]["changed"] > 0
     text = _patched_text(EXCERPT)
     assert "\u0f51\u0f58\u0f0b\u0f46\u0f7c\u0f66\u0f0b\u0f58\u0f5b\u0f51\u0f0b\u0f54\u0f60\u0f72" in text
     assert "\u0f56\u0f7c\u0f51\u0f0b\u0f62\u0f92\u0fb1\u0f63" in text

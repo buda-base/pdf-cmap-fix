@@ -42,6 +42,16 @@ SHEJA_HINTS = {
     "æ": "ལ",
 }
 
+# Visual truth for Dzongkha / Tibetan Calligraphic (precomposed stacks).
+CALLIGRAPHIC_HINTS = {
+    "!": "ཀ",
+    "D": "རྟ",
+    "e": "བྱ",
+    "i": "གྲ",
+    "v": "བླ",
+    "\u00a6": "ུ",
+}
+
 
 def _load_tables(tables_dir: Path) -> dict[str, dict[str, dict[int, str]]]:
     """``{source_stem: {font_name: {cp: unicode}}}``."""
@@ -72,7 +82,7 @@ def _matching_fonts(tables: dict[str, dict[str, dict[int, str]]], substr: str) -
     needle = substr.lower()
     for by_font in tables.values():
         for name in by_font:
-            if needle in name.lower() or "youtso" in name.lower() or "bod-yig" in name.lower():
+            if needle in name.lower():
                 names.add(name)
     return sorted(names)
 
@@ -124,6 +134,87 @@ def _charstring_names(buf: bytes) -> set[str]:
     return set(cs.keys()) if cs else set()
 
 
+def _is_sfnt(buf: bytes) -> bool:
+    return bool(buf) and buf[:4] in (b"\x00\x01\x00\x00", b"true", b"OTTO")
+
+
+def _is_type1_pfa(buf: bytes) -> bool:
+    return bool(buf) and buf.startswith((b"%!FontType1", b"%!PS-AdobeFont"))
+
+
+_TYPE1_ENC_DUP = re.compile(r"dup\s+(\d+)\s+/([A-Za-z0-9._]+)\s+put")
+
+
+def _type1_builtin_names(buf: bytes) -> dict[int, str]:
+    """Type1 built-in Encoding (``dup 65 /G41 put``) from the PFA header.
+
+    Distiller MSTT faces name every slot ``Gxx`` and ship no Unicode cmap, so
+    CFF/TTF outline drawing and ``insert_text`` both miss them.
+    """
+    if not _is_type1_pfa(buf):
+        return {}
+    end = buf.find(b"currentfile eexec")
+    header = buf[: end if end >= 0 else min(len(buf), 20_000)].decode(
+        "latin-1", errors="ignore"
+    )
+    out: dict[int, str] = {}
+    for m in _TYPE1_ENC_DUP.finditer(header):
+        name = m.group(2)
+        if name != ".notdef":
+            out[int(m.group(1))] = name
+    return out
+
+
+def _embedded_name_index(buf: bytes) -> tuple[set[str], dict[int, str]]:
+    """Names present in the embedding, plus cmap / Type1 code → name."""
+    cff = _charstring_names(buf)
+    cmap_names: dict[int, str] = {}
+    ttf_names: set[str] = set()
+    if _is_sfnt(buf):
+        try:
+            import io
+
+            from fontTools.ttLib import TTFont
+
+            tt = TTFont(io.BytesIO(buf))
+            ttf_names = set(tt.getGlyphOrder()) - {".notdef"}
+            if "cmap" in tt:
+                for table in tt["cmap"].tables:
+                    for code, gname in (getattr(table, "cmap", None) or {}).items():
+                        if gname and gname != ".notdef" and gname in ttf_names:
+                            cmap_names.setdefault(int(code), gname)
+        except Exception:
+            pass
+    t1_names = _type1_builtin_names(buf)
+    if t1_names:
+        cmap_names = {**t1_names, **cmap_names}
+    return (cff or ttf_names or set(t1_names.values())), cmap_names
+
+
+def _agl_cp(gname: str) -> int | None:
+    """Adobe Glyph List codepoint for a WinAnsi encoding name, if any."""
+    if not gname or gname == ".notdef":
+        return None
+    try:
+        from fontTools.agl import toUnicode
+
+        uni = toUnicode(gname)
+    except Exception:
+        return None
+    if uni and len(uni) == 1:
+        return ord(uni)
+    return None
+
+
+def _resolve_draw_name(enc_name: str, code: int, present: set[str], cmap_names: dict[int, str]) -> str:
+    if enc_name and enc_name in present:
+        return enc_name
+    mapped = cmap_names.get(code, "")
+    if mapped and mapped in present:
+        return mapped
+    return enc_name or mapped or ""
+
+
 def _collect_font_rows(doc, font_substr: str, *, all_encoded: bool = False) -> list[dict]:
     from pdf_cmap_fix.content_streams import collect_referenced_gids
     from pdf_cmap_fix.pdf_font_encoding import resolve_simple_encoding
@@ -159,7 +250,7 @@ def _collect_font_rows(doc, font_substr: str, *, all_encoded: bool = False) -> l
             buf = bytes(tup[3]) if tup and len(tup) >= 4 and tup[3] else b""
         except Exception:
             buf = b""
-        present = _charstring_names(buf)
+        present, cmap_names = _embedded_name_index(buf)
         codes = set(used.get(xref, ()))
         if all_encoded or not codes:
             codes |= {
@@ -167,7 +258,11 @@ def _collect_font_rows(doc, font_substr: str, *, all_encoded: bool = False) -> l
                 for c, gname in encoding.items()
                 if gname
                 and gname != ".notdef"
-                and (not present or gname in present)
+                and (
+                    not present
+                    or gname in present
+                    or cmap_names.get(c) in present
+                )
             }
             codes |= set(existing)
         for code in sorted(c for c in codes if 0 <= c <= 0xFFFF):
@@ -175,8 +270,23 @@ def _collect_font_rows(doc, font_substr: str, *, all_encoded: bool = False) -> l
             if key in seen:
                 continue
             seen.add(key)
+            enc_name = encoding.get(code, "")
+            draw_name = _resolve_draw_name(enc_name, code, present, cmap_names)
+            if (
+                present
+                and draw_name not in present
+                and code not in used.get(xref, ())
+                and code not in existing
+            ):
+                continue
             tu = existing.get(code, "")
-            cp = ord(tu[0]) if len(tu) == 1 else code
+            agl = _agl_cp(enc_name)
+            if tu and len(tu) == 1:
+                cp = ord(tu[0])
+            elif agl is not None:
+                cp = agl
+            else:
+                cp = code
             rows.append(
                 {
                     "font_xref": xref,
@@ -186,7 +296,17 @@ def _collect_font_rows(doc, font_substr: str, *, all_encoded: bool = False) -> l
                     "code_hex": f"{code:02X}" if code <= 0xFF else f"{code:04X}",
                     "tounicode": tu,
                     "lookup_cp": cp,
-                    "glyph_name": encoding.get(code, ""),
+                    # PFA Gxx and these Distiller CFF subsets are keyed by the
+                    # byte the PDF renders, not by an AGL name / ToUnicode CP.
+                    "export_cp": (
+                        code
+                        if any(
+                            marker in pdf_name
+                            for marker in ("MSTT", "TibetanChosGyal", "TibetanMangala")
+                        )
+                        else cp
+                    ),
+                    "glyph_name": draw_name,
                 }
             )
     return rows
@@ -297,11 +417,35 @@ def _pixmap_has_ink(pix, threshold: int = 80) -> bool:
     except Exception:
         return True
     step = pix.n
-    # Guides are light gray / lilac; real glyph ink is near-black.
+    # Guides (gray frame, blue baseline) stay above this; glyph ink is near-black.
     for i in range(0, len(samples), step):
         if samples[i] < threshold and samples[i + min(1, step - 1)] < threshold:
             return True
     return False
+
+
+# Visible in the PNG, but blue enough that ``_pixmap_has_ink`` ignores it.
+_BASELINE_COLOR = (0.20, 0.40, 0.86)
+_BASELINE_WIDTH = 0.75
+
+
+def _expand_bounds_to_guide(
+    bounds, guide_y: float = 0.0
+) -> tuple[float, float, float, float]:
+    """Keep the guide (baseline or ka headline) in frame."""
+    xmin, ymin, xmax, ymax = bounds
+    return xmin, min(ymin, guide_y), xmax, max(ymax, guide_y)
+
+
+def _stroke_baseline(page, y: float, x0: float, x1: float) -> None:
+    import fitz
+
+    page.draw_line(
+        fitz.Point(x0, y),
+        fitz.Point(x1, y),
+        color=_BASELINE_COLOR,
+        width=_BASELINE_WIDTH,
+    )
 
 
 @lru_cache(maxsize=8)
@@ -329,7 +473,56 @@ def _glyph_bounds(top, gname: str):
     return pen.bounds
 
 
-def _render_cff_outline(buf: bytes, gname: str, dest: Path) -> bool:
+def _ttf_glyph_bounds(buf: bytes, gname: str):
+    if not _is_sfnt(buf) or not gname or gname == ".notdef":
+        return None
+    import io
+
+    from fontTools.pens.boundsPen import BoundsPen
+    from fontTools.ttLib import TTFont
+
+    try:
+        tt = TTFont(io.BytesIO(buf))
+        gs = tt.getGlyphSet()
+        if gname not in gs:
+            return None
+        bp = BoundsPen(gs)
+        gs[gname].draw(bp)
+        return bp.bounds
+    except Exception:
+        return None
+
+
+def _outline_ymax(buf: bytes, gname: str) -> float | None:
+    """Top of a named glyph in font units (Tibetan headline when gname is ka)."""
+    if not buf or not gname or gname == ".notdef":
+        return None
+    try:
+        bounds = _glyph_bounds(_cff_top(buf), gname)
+        if bounds:
+            return float(bounds[3])
+    except Exception:
+        pass
+    bounds = _ttf_glyph_bounds(buf, gname)
+    if bounds:
+        return float(bounds[3])
+    return None
+
+
+def _font_upem(buf: bytes) -> float:
+    if _is_sfnt(buf):
+        try:
+            import io
+
+            from fontTools.ttLib import TTFont
+
+            return float(TTFont(io.BytesIO(buf))["head"].unitsPerEm)
+        except Exception:
+            pass
+    return 1000.0
+
+
+def _render_cff_outline(buf: bytes, gname: str, dest: Path, guide_y: float = 0.0) -> bool:
     """Rasterise a CFF CharString by name (no ToUnicode / insert_text).
 
     Needed for slots whose ToUnicode is ``<`` / ``>`` (breaks PDF text
@@ -355,7 +548,7 @@ def _render_cff_outline(buf: bytes, gname: str, dest: Path) -> bool:
         return False
     if not bounds or not contours:
         return False
-    xmin, ymin, xmax, ymax = bounds
+    xmin, ymin, xmax, ymax = _expand_bounds_to_guide(bounds, guide_y)
     pad_fu = 80.0
     fw = max(xmax - xmin, 50.0) + 2 * pad_fu
     fh = max(ymax - ymin, 50.0) + 2 * pad_fu
@@ -374,13 +567,7 @@ def _render_cff_outline(buf: bytes, gname: str, dest: Path) -> bool:
             color=(0.82, 0.82, 0.82),
             width=0.4,
         )
-        _bx, by = xy(0.0, 0.0)
-        p.draw_line(
-            fitz.Point(0, by),
-            fitz.Point(page_w, by),
-            color=(0.70, 0.70, 0.88),
-            width=0.4,
-        )
+        _stroke_baseline(p, xy(0.0, guide_y)[1], 0, page_w)
         shape = p.new_shape()
         for contour in contours:
             if len(contour) < 3:
@@ -399,12 +586,90 @@ def _render_cff_outline(buf: bytes, gname: str, dest: Path) -> bool:
         d.close()
 
 
-def _render_isolated_glyph(buf: bytes, text: str, gname: str, dest: Path) -> bool:
+def _render_ttf_outline(buf: bytes, gname: str, dest: Path, guide_y: float = 0.0) -> bool:
+    """Rasterise a TrueType glyf by PostScript name (PDF /Encoding slot)."""
+    if not buf or not gname or gname == ".notdef":
+        return False
+    if not _is_sfnt(buf):
+        return False
+    import io
+
+    import fitz
+    from fontTools.pens.boundsPen import BoundsPen
+    from fontTools.pens.recordingPen import RecordingPen
+    from fontTools.ttLib import TTFont
+
+    from pdf_cmap_fix.glyph_shape_id import _flatten
+
+    try:
+        tt = TTFont(io.BytesIO(buf))
+        if "glyf" not in tt:
+            return False
+        gs = tt.getGlyphSet()
+        if gname not in gs:
+            return False
+        rp = RecordingPen()
+        gs[gname].draw(rp)
+        bp = BoundsPen(gs)
+        gs[gname].draw(bp)
+        bounds = bp.bounds
+        contours = _flatten(rp.value)
+    except Exception:
+        return False
+    if not bounds or not contours:
+        return False
+    xmin, ymin, xmax, ymax = _expand_bounds_to_guide(bounds, guide_y)
+    pad_fu = max(80.0, (ymax - ymin) * 0.08, (xmax - xmin) * 0.08)
+    fw = max(xmax - xmin, 50.0) + 2 * pad_fu
+    fh = max(ymax - ymin, 50.0) + 2 * pad_fu
+    scale = 72.0 / max(fw, fh)
+    page_w = fw * scale
+    page_h = fh * scale
+
+    def xy(x: float, y: float) -> tuple[float, float]:
+        return ((x - (xmin - pad_fu)) * scale, ((ymax + pad_fu) - y) * scale)
+
+    d = fitz.open()
+    try:
+        p = d.new_page(width=page_w, height=page_h)
+        p.draw_rect(
+            fitz.Rect(0.5, 0.5, page_w - 0.5, page_h - 0.5),
+            color=(0.82, 0.82, 0.82),
+            width=0.4,
+        )
+        _stroke_baseline(p, xy(0.0, guide_y)[1], 0, page_w)
+        shape = p.new_shape()
+        for contour in contours:
+            if len(contour) < 3:
+                continue
+            shape.draw_polyline([fitz.Point(*xy(x, y)) for x, y in contour])
+            shape.finish(color=(0, 0, 0), fill=(0, 0, 0), closePath=True, width=0)
+        shape.commit()
+        pix = p.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        if not _pixmap_has_ink(pix):
+            return False
+        pix.save(str(dest))
+        return True
+    except Exception:
+        return False
+    finally:
+        d.close()
+
+
+def _render_isolated_glyph(
+    buf: bytes, text: str, gname: str, dest: Path, guide_y: float = 0.0
+) -> bool:
     """Draw one glyph from the embedded program, fitted to its outline box."""
     if not buf:
         return False
-    if _render_cff_outline(buf, gname, dest):
+    if _render_cff_outline(buf, gname, dest, guide_y=guide_y):
         return True
+    if _render_ttf_outline(buf, gname, dest, guide_y=guide_y):
+        return True
+    # TrueType already tried the real glyf. insert_text would only
+    # paint a .notdef tofu for subset-missing WinAnsi names.
+    if _is_sfnt(buf):
+        return False
     if not text:
         return False
     import fitz
@@ -421,7 +686,7 @@ def _render_isolated_glyph(buf: bytes, text: str, gname: str, dest: Path) -> boo
     upem = 1000.0
     scale = fs / upem
     if bounds and bounds[0] <= bounds[2] and bounds[1] <= bounds[3]:
-        xmin, ymin, xmax, ymax = bounds
+        xmin, ymin, xmax, ymax = _expand_bounds_to_guide(bounds, guide_y)
         gw = max((xmax - xmin) * scale, 12.0)
         gh = max((ymax - ymin) * scale, 12.0)
         page_w = gw + 2 * pad
@@ -441,12 +706,7 @@ def _render_isolated_glyph(buf: bytes, text: str, gname: str, dest: Path) -> boo
             color=(0.82, 0.82, 0.82),
             width=0.4,
         )
-        p.draw_line(
-            fitz.Point(1, origin_y),
-            fitz.Point(page_w - 1, origin_y),
-            color=(0.70, 0.70, 0.88),
-            width=0.4,
-        )
+        _stroke_baseline(p, origin_y - guide_y * scale, 1, page_w - 1)
         p.insert_text((origin_x, origin_y), text, fontname="f", fontsize=fs)
         pix = p.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
         if not _pixmap_has_ink(pix):
@@ -471,7 +731,142 @@ def _merge_rows(groups: list[list[dict]]) -> list[dict]:
     return [by_key[k] for k in sorted(by_key)]
 
 
-def _render_glyphs(doc, rows: list[dict], out_dir: Path, *, clear: bool = True, stem_prefix: str = "") -> None:
+class _SimpleFontReplay:
+    """Draw a simple-font encoding byte the same way the PDF page does.
+
+    Needed for Type1 PFA (Distiller MSTT): no CFF/glyf we can name-draw, and
+    MuPDF ``insert_text`` has no Unicode cmap to those ``Gxx`` slots.
+    """
+
+    def __init__(self, src_doc):
+        self.src = src_doc
+        self._loc: dict[int, tuple[int, str]] = {}
+        self._tmps: dict[int, tuple] = {}
+        for pno in range(len(src_doc)):
+            for f in src_doc[pno].get_fonts(full=True):
+                xref = f[0]
+                if xref not in self._loc and f[4]:
+                    self._loc[xref] = (pno, f[4])
+
+    def render(
+        self,
+        xref: int,
+        code: int,
+        dest: Path,
+        fontsize: float = 48.0,
+        guide_y: float = 0.0,
+        upem: float = 1000.0,
+    ) -> bool:
+        if not (0 <= code <= 255):
+            return False
+        slot = self._ensure(xref)
+        if not slot:
+            return False
+        import fitz
+
+        tmp, page, cxref, res = slot
+        ox, oy = 200.0, 200.0
+        guide_pdf_y = oy + guide_y * fontsize / (upem or 1000.0)
+        try:
+            tmp.update_stream(
+                cxref,
+                (
+                    f"q\n{_BASELINE_COLOR[0]} {_BASELINE_COLOR[1]} "
+                    f"{_BASELINE_COLOR[2]} RG\n{_BASELINE_WIDTH} w\n"
+                    f"{ox - 40} {guide_pdf_y} m\n{ox + 60} {guide_pdf_y} l\nS\nQ\n"
+                    f"q\nBT\n/{res} {fontsize} Tf\n{ox} {oy} Td\n"
+                    f"<{code:02X}> Tj\nET\nQ\n"
+                ).encode(),
+            )
+            origin = fitz.Point(ox, oy) * page.transformation_matrix
+            clip = (
+                fitz.Rect(
+                    origin.x - 36,
+                    origin.y - 48,
+                    origin.x + 56,
+                    origin.y + 40,
+                )
+                & page.rect
+            )
+            if clip.is_empty:
+                return False
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), clip=clip, alpha=False)
+            if not _pixmap_has_ink(pix):
+                return False
+            pix.save(str(dest))
+            return True
+        except Exception:
+            return False
+
+    def _ensure(self, xref: int):
+        cached = self._tmps.get(xref)
+        if cached is not None:
+            return cached
+        loc = self._loc.get(xref)
+        if not loc:
+            return None
+        import fitz
+
+        pno, res = loc
+        tmp = fitz.open()
+        tmp.insert_pdf(self.src, from_page=pno, to_page=pno)
+        page = tmp[0]
+        contents = page.get_contents()
+        if not contents:
+            tmp.close()
+            return None
+        self._tmps[xref] = (tmp, page, contents[0], res)
+        return self._tmps[xref]
+
+    def close(self) -> None:
+        for tmp, *_ in self._tmps.values():
+            tmp.close()
+        self._tmps.clear()
+
+
+def _bbox_lookup_keys(row: dict) -> list[tuple[str, str]]:
+    """Page-extract keys: ToUnicode first, then the encoding byte as a char."""
+    font = _font_tail(row["pdf_font_name"])
+    keys: list[tuple[str, str]] = []
+    tu = row.get("tounicode") or ""
+    if tu:
+        keys.append((font, tu))
+    code = row.get("code")
+    if isinstance(code, int) and 0 <= code <= 0x10FFFF:
+        keys.append((font, chr(code)))
+    return keys
+
+
+def _headline_guide_ys(
+    rows: list[dict], bufs: dict[int, bytes], headline_code: int | None
+) -> dict[int, float]:
+    """Per-xref font-unit y of the top of ``headline_code`` (usually ka)."""
+    if headline_code is None:
+        return {}
+    out: dict[int, float] = {}
+    for row in rows:
+        xref = row["font_xref"]
+        if xref in out or row["code"] != headline_code:
+            continue
+        y = _outline_ymax(bufs.get(xref, b""), row.get("glyph_name") or "")
+        if y is not None:
+            out[xref] = y
+            print(
+                f"headline code {headline_code} ({row['code_hex']}) "
+                f"{row['pdf_font_name']} /{row.get('glyph_name')} y={y:.1f}"
+            )
+    return out
+
+
+def _render_glyphs(
+    doc,
+    rows: list[dict],
+    out_dir: Path,
+    *,
+    clear: bool = True,
+    stem_prefix: str = "",
+    headline_code: int | None = None,
+) -> None:
     """Isolated font glyph (primary) plus the first on-page crop (context)."""
     import fitz
 
@@ -482,30 +877,60 @@ def _render_glyphs(doc, rows: list[dict], out_dir: Path, *, clear: bool = True, 
     glyph_dir.mkdir(exist_ok=True)
     bboxes = _first_char_bboxes(doc)
     bufs = _font_buffers(doc, {row["font_xref"] for row in rows})
-    for row in rows:
-        stem = f"{stem_prefix}{row['font_xref']}_{row['code']:04X}"
-        row["glyph"] = ""
-        row["glyph_pdf"] = ""
-        font_png = glyph_dir / f"{stem}_font.png"
-        if _render_isolated_glyph(
-            bufs.get(row["font_xref"], b""),
-            _glyph_draw_text(row),
-            row.get("glyph_name") or "",
-            font_png,
-        ):
-            row["glyph"] = f"glyphs/{stem}_font.png"
-        key = (_font_tail(row["pdf_font_name"]), row["tounicode"])
-        hit = bboxes.get(key)
-        if hit is None:
-            continue
-        pno, rect, size = hit
-        clip = _expand_zero_width_clip(rect, size, doc[pno].rect)
-        if clip.is_empty or clip.width < 1 or clip.height < 1:
-            continue
-        pix = doc[pno].get_pixmap(matrix=fitz.Matrix(3, 3), clip=clip)
-        pdf_png = glyph_dir / f"{stem}_pdf.png"
-        pix.save(str(pdf_png))
-        row["glyph_pdf"] = f"glyphs/{stem}_pdf.png"
+    guides = _headline_guide_ys(rows, bufs, headline_code)
+    replay = _SimpleFontReplay(doc)
+    try:
+        for row in rows:
+            stem = f"{stem_prefix}{row['font_xref']}_{row['code']:04X}"
+            row["glyph"] = ""
+            row["glyph_pdf"] = ""
+            font_png = glyph_dir / f"{stem}_font.png"
+            buf = bufs.get(row["font_xref"], b"")
+            guide_y = guides.get(row["font_xref"], 0.0)
+            if not _is_sfnt(buf):
+                # Bare CFF/PFA glyph names can be stale or deliberately
+                # scrambled. Replay the byte through the PDF's own font
+                # resource; that is what is actually visible on the page.
+                rendered = replay.render(
+                    row["font_xref"],
+                    row["code"],
+                    font_png,
+                    guide_y=guide_y,
+                    upem=_font_upem(buf),
+                )
+            else:
+                rendered = _render_isolated_glyph(
+                    buf,
+                    _glyph_draw_text(row),
+                    row.get("glyph_name") or "",
+                    font_png,
+                    guide_y=guide_y,
+                ) or replay.render(
+                    row["font_xref"],
+                    row["code"],
+                    font_png,
+                    guide_y=guide_y,
+                    upem=_font_upem(buf),
+                )
+            if rendered:
+                row["glyph"] = f"glyphs/{stem}_font.png"
+            hit = None
+            for key in _bbox_lookup_keys(row):
+                hit = bboxes.get(key)
+                if hit is not None:
+                    break
+            if hit is None:
+                continue
+            pno, rect, size = hit
+            clip = _expand_zero_width_clip(rect, size, doc[pno].rect)
+            if clip.is_empty or clip.width < 1 or clip.height < 1:
+                continue
+            pix = doc[pno].get_pixmap(matrix=fitz.Matrix(3, 3), clip=clip)
+            pdf_png = glyph_dir / f"{stem}_pdf.png"
+            pix.save(str(pdf_png))
+            row["glyph_pdf"] = f"glyphs/{stem}_pdf.png"
+    finally:
+        replay.close()
 
 
 def _compare(tables: dict[str, dict[str, dict[int, str]]], fonts: list[str]) -> None:
@@ -549,6 +974,11 @@ _APP_JS = r"""
 const srcs = DATA.sources;
 const tbody = document.getElementById("rows");
 const statusEl = document.getElementById("status");
+const fontLabel = document.getElementById("fontLabel");
+if (fontLabel) {
+  const fonts = [...new Set((DATA.rows || []).map((r) => r.table_font).filter(Boolean))];
+  fontLabel.textContent = (fonts.join(", ") || "font") + " — glyph vs Unicode mapping";
+}
 
 const LONE_VOWEL = {
   o: "\u0f7c", i: "\u0f72", u: "\u0f74", e: "\u0f7a",
@@ -558,6 +988,36 @@ const MARK_EWTS = Object.fromEntries(
   Object.entries(LONE_VOWEL).map(([k, v]) => [v, k])
 );
 const TSHEG = "\u0f0b";
+const ACHEN = "\u0f68";
+
+function toSubjoined(uni) {
+  let out = "";
+  for (const ch of uni) {
+    const cp = ch.codePointAt(0);
+    out += (cp >= 0x0f40 && cp <= 0x0f6c) ? String.fromCodePoint(cp + 0x50) : ch;
+  }
+  return out;
+}
+
+function fromSubjoined(uni) {
+  let out = "";
+  for (const ch of uni) {
+    const cp = ch.codePointAt(0);
+    out += (cp >= 0x0f90 && cp <= 0x0fbc) ? String.fromCodePoint(cp - 0x50) : ch;
+  }
+  return out;
+}
+
+function isIsolatedSubjoined(uni) {
+  if (!uni) return false;
+  let saw = false;
+  for (const ch of uni) {
+    const cp = ch.codePointAt(0);
+    if (cp >= 0x0f90 && cp <= 0x0fbc) saw = true;
+    else if (!(cp >= 0x0f71 && cp <= 0x0f84) && cp !== 0x0fb7) return false;
+  }
+  return saw;
+}
 
 function esc(s) {
   return String(s)
@@ -576,9 +1036,14 @@ function ewtsToUni(ewts) {
   const c = conv();
   if (!c) return ewts;
   const warns = [];
-  let uni = c.fromWylie(ewts, { sloppy: true }, warns);
   const trimmed = ewts.trim();
-  if (LONE_VOWEL[trimmed] && uni.charAt(0) === "\u0f68") {
+  if (trimmed.startsWith("+") && trimmed.length > 1) {
+    const base = c.fromWylie(trimmed.slice(1), { sloppy: true }, warns);
+    const sub = toSubjoined(base.charAt(0) === ACHEN && trimmed !== "+a" ? base.slice(1) : base);
+    if (sub) return { uni: sub, warns };
+  }
+  let uni = c.fromWylie(ewts, { sloppy: true }, warns);
+  if (LONE_VOWEL[trimmed] && uni.charAt(0) === ACHEN) {
     uni = uni.slice(1);
   }
   return { uni, warns };
@@ -589,6 +1054,10 @@ function uniToEwts(uni) {
   if (MARK_EWTS[uni]) return MARK_EWTS[uni];
   const c = conv();
   if (!c || !uni) return "";
+  if (isIsolatedSubjoined(uni)) {
+    const w = c.toWylie(fromSubjoined(uni));
+    return w ? "+" + w : "";
+  }
   return c.toWylie(uni);
 }
 
@@ -636,8 +1105,8 @@ function refreshAll() {
   }
   const hint = document.getElementById("modeHint");
   hint.textContent = mode === "ewts"
-    ? "Type EWTS (rgya, la, o). Lone vowels drop a-chen so o → ོ. Space is tsheg."
-    : "Type Unicode. The preview shows EWTS.";
+    ? "Type EWTS (rgya, la, o, +ka). +ka is subjoined ྐ. Lone vowels drop a-chen so o → ོ. Space is tsheg."
+    : "Type Unicode. The preview shows EWTS (+ka for a subjoined letter).";
 }
 
 for (const r of DATA.rows) {
@@ -666,7 +1135,8 @@ for (const r of DATA.rows) {
       r.lookup_cp.toString(16).toUpperCase() + "</code></td>" +
     "<td>" + fontImg + gname + "</td>" +
     "<td>" + pdfImg + "</td>" +
-    "<td class=\"edit-cell\"><input class=\"edit\" data-cp=\"" + r.lookup_cp +
+    "<td class=\"edit-cell\"><input class=\"edit\" data-cp=\"" +
+      (r.export_cp === undefined ? r.lookup_cp : r.export_cp) +
       "\" data-font=\"" + esc(r.table_font || "") +
       "\" data-unicode=\"" + esc(initial) + "\" value=\"" + esc(initial) +
       "\"><span class=\"preview\"></span></td>" +
@@ -772,8 +1242,12 @@ def _write_html(out_dir: Path, payload: dict, jsewts_ok: bool) -> None:
 </head>
 <body>
 <h1>Legacy font table editor</h1>
+<p id="fontLabel"></p>
 <p>Generated by <code>scripts/misc/edit_legacy_font_table.py</code>.
-Edit the value, then export CSV (always Unicode). Do not commit this folder.</p>
+The isolated glyph is the visual truth; <code>vendored-tiblegenc</code> is the
+shipped mapping (full stacks). <code>attu</code> is the old decomposed table
+kept for comparison. The blue line is {payload.get("guide_label") or "the font baseline"}.
+Edit a cell and export CSV. Do not commit this folder.</p>
 <div class="toolbar">
   <div class="mode">
     <label><input type="radio" name="editMode" value="unicode" checked> Unicode</label>
@@ -857,6 +1331,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only list codes that appear in content streams",
     )
+    p.add_argument(
+        "--headline-code",
+        type=lambda s: int(s, 16) if s.lower().startswith("0x") else int(s),
+        default=None,
+        help="Draw the blue guide at the top of this encoding byte "
+        "(e.g. 43 / 0x2B for TCRC ka) instead of y=0",
+    )
     args = p.parse_args(argv)
 
     for pdf in args.pdf:
@@ -886,7 +1367,12 @@ def main(argv: list[str] | None = None) -> int:
             if i == 0:
                 page_image = _render_page(doc, args.out, args.page)
             _render_glyphs(
-                doc, part, args.out, clear=(i == 0), stem_prefix=f"{i}_"
+                doc,
+                part,
+                args.out,
+                clear=(i == 0),
+                stem_prefix=f"{i}_",
+                headline_code=args.headline_code,
             )
             grouped.append(part)
         finally:
@@ -894,10 +1380,15 @@ def main(argv: list[str] | None = None) -> int:
     rows = _merge_rows(grouped)
     print(f"merged {sum(len(g) for g in grouped)} collected rows → {len(rows)} unique (font, code)")
 
+    used_fonts = {row["table_font"] for row in rows if row.get("table_font")}
+    fonts = [f for f in fonts if f in used_fonts]
+    source_stems = [s for s in ("vendored-tiblegenc", "attu") if s in tables]
+    if not source_stems:
+        source_stems = [s for s in tables if any(f in tables[s] for f in fonts)]
     sources = []
-    for src, by_font in tables.items():
+    for src in source_stems:
         for font in fonts:
-            if font in by_font:
+            if font in tables[src]:
                 sources.append(f"{src}/{font}")
 
     edits = _load_edits(args.edits) if args.edits else {}
@@ -909,7 +1400,8 @@ def main(argv: list[str] | None = None) -> int:
     fallback_fonts.extend(("TB-Youtso", "TB2-Youtso"))
     for row in rows:
         cp = row["lookup_cp"]
-        row["hint"] = SHEJA_HINTS.get(row["tounicode"])
+        hints = CALLIGRAPHIC_HINTS if "calligraph" in args.font_substr.lower() else SHEJA_HINTS
+        row["hint"] = hints.get(row["tounicode"])
         row["edit"] = edits.get((row["table_font"], cp))
         if row["edit"] is None:
             for fb in fallback_fonts:
@@ -917,19 +1409,31 @@ def main(argv: list[str] | None = None) -> int:
                 if row["edit"] is not None:
                     break
         row["sources"] = {}
-        for src, by_font in tables.items():
+        for src in source_stems:
+            by_font = tables[src]
             for font in fonts:
                 if font not in by_font:
                     continue
                 row["sources"][f"{src}/{font}"] = by_font[font].get(cp, "")
+        if row["edit"] is None:
+            vendored = tables.get("vendored-tiblegenc") or tables.get("tiblegenc") or {}
+            row["edit"] = (vendored.get(row["table_font"]) or {}).get(cp, "")
 
     _compare(tables, fonts)
 
+    if args.headline_code is not None:
+        guide_label = (
+            f"the top of code {args.headline_code} / "
+            f"{args.headline_code:02X}, not the font baseline"
+        )
+    else:
+        guide_label = "the font baseline"
     payload = {
         "pdf": [str(p) for p in args.pdf],
         "page_image": page_image,
         "sources": sources,
         "rows": rows,
+        "guide_label": guide_label,
     }
     (args.out / "data.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"

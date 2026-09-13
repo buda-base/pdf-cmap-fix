@@ -1,8 +1,9 @@
 """Curated char -> Unicode conversion tables for legacy non-Unicode Tibetan fonts.
 
-The tables (``data/pytiblegenc/tiblegenc.csv`` and ``utfc.csv``) and the
+The base tables (``data/pytiblegenc/tiblegenc.csv`` and ``utfc.csv``) and the
 font-name normalisation/alias rules are vendored from ``pytiblegenc``
 (https://github.com/buda-base/pydeduff, ``pytiblegenc/char_converter.py``).
+Book-reviewed additions live in ``reviewed_bugs4.csv``.
 
 These legacy fonts (Ededris/Dedris, TibetanChogyal, LTibetan, Esam*, ...) carry
 no usable GSUB/cmap, so pdf-cmap-fix's GSUB-derived lookups produce garbage for
@@ -24,9 +25,10 @@ from typing import Optional, Tuple
 ERROR_CHR = "\u0f20\u0f20\u0f20\u0f20"  # "༠༠༠༠"
 
 _DATA_DIR = Path(__file__).resolve().parent / "data" / "pytiblegenc"
-# tiblegenc.csv is the primary table; utfc.csv only fills gaps (matches the
-# base/utfc precedence in pytiblegenc's ``_convert_char``).
-_TABLE_FILES = ("tiblegenc.csv", "utfc.csv")
+# tiblegenc.csv is the primary table; reviewed_bugs4.csv adds distinct,
+# book-verified encodings plus a few targeted corrections; utfc.csv only fills
+# remaining gaps (matches the base/utfc precedence in ``_convert_char``).
+_TABLE_FILES = ("tiblegenc.csv", "reviewed_bugs4.csv", "utfc.csv")
 
 # Vendored from pytiblegenc.char_converter.FONT_ALIASES.
 FONT_ALIASES = {
@@ -36,12 +38,9 @@ FONT_ALIASES = {
     "TibetanChogyalSkt": "TibetanChogyalSkt1",
     "TB-TTYoutso": "TB-Youtso",
     "TB2-TTYoutso": "TB2-Youtso",
-    # Acrobat / PageMaker often embeds the Bold cut under the TTYoutso name.
-    # The dedicated TB-Youtso-Bold table is a sparse Sheja excerpt; these
-    # books use Bold as the body face with the Regular encoding, so map to
-    # the full Regular tables. Do not alias TB-Youtso-Bold itself.
-    "TB-TTYoutso-Bold": "TB-Youtso",
-    "TB2-TTYoutso-Bold": "TB2-Youtso",
+    # TB-TTYoutso-Bold / TB2-TTYoutso-Bold deliberately have dedicated
+    # reviewed tables. Their ancient-history encoding differs substantially
+    # from TB-Youtso, despite the similar PostScript names.
     "TCRCYoutso": "TCRC Youtso",
     "TCRC-Bod-Yig": "TCRC Bod-Yig",
 }
@@ -59,11 +58,9 @@ def normalize_font_name(font_name: str, weight: Optional[str] = None) -> str:
         font_name = "Ed" + font_name[1:]
     if font_name.startswith("Sam") and len(font_name) == 4:
         font_name = "Es" + font_name[1:]
-    # Distiller writes ``TibetanChosGyalSkt2``; tables are ``TibetanChogyal*``.
-    if "ChosGyal" in font_name:
-        font_name = font_name.replace("ChosGyal", "Chogyal")
-    # Dzongkha Calligraphic shares the Tibetan Calligraphic encoding
-    # (identical attu tables).
+    # Dzongkha Calligraphic shares the Tibetan Calligraphic encoding.
+    # Stack slots are full precomposed syllables (Chogyal layout), not
+    # attu's decomposed subjoined-only rows.
     if font_name.startswith("DzongkhaCalligraphic"):
         font_name = "Tibetan" + font_name[len("Dzongkha") :]
     # Tables use a space after the TCRC foundry (``TCRC Youtso``);

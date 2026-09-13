@@ -1,8 +1,9 @@
-"""Regression tests for the two bugs4 PDFs that now extract cleanly.
+"""Regression tests for bugs4 PDFs that now extract cleanly.
 
 Fixtures are page 1 of the MonlamUniOuChan2 Kagyu namthar (gname fallback
-from the default gid collector) and the Himalaya-G Palmo namthar
-(embedded-GID map against the PUA-free lookup).
+from the default gid collector), the Himalaya-G Palmo namthar
+(embedded-GID map against the PUA-free lookup), and page 1 of the
+DzongkhaCalligraphic skull-cup text (full-stack Calligraphic table).
 """
 from __future__ import annotations
 
@@ -16,6 +17,9 @@ from pdf_cmap_fix.tounicode_core import apply_font_merges_to_doc
 DATA = Path(__file__).resolve().parent / "data"
 MONLAM = DATA / "monlam-ouchan2-excerpt.pdf"
 HIMALAYA = DATA / "himalaya-g-excerpt.pdf"
+DZONGKHA = DATA / "dzongkha-calligraphic-excerpt.pdf"
+MSTT = DATA / "mstt-dagpo-excerpt.pdf"
+CHENREZIG = DATA / "chenrezig-chosgyal-excerpt.pdf"
 PUA_FREE = FONT_LOOKUP_DIR.parent / "font_lookup_gid_pua_free"
 
 
@@ -83,3 +87,44 @@ def test_himalaya_g_excerpt_recovers_title() -> None:
     assert "\u0f60\u0f56\u0fb1\u0f74\u0f44\u0f0b\u0f62\u0f92\u0fb1\u0f74\u0f51" in text
     assert "\u0f46\u0f7c\u0f66\u0f0b\u0f42\u0f4f\u0f58\u0f0b\u0f5e\u0f7a\u0f66" in text
     assert "\u0f51\x06\u0f0b" not in text
+
+
+@pytest.mark.skipif(not DZONGKHA.is_file(), reason="Dzongkha Calligraphic excerpt not present")
+def test_dzongkha_calligraphic_excerpt_recovers_title() -> None:
+    recs = _records(DZONGKHA)
+    hit = next(r for r in recs if "DzongkhaCalligraphic" in (r.get("pdf_font_name") or "") and r.get("changed", 0) > 10)
+    assert hit["db_name_matched"] == "TibetanCalligraphic"
+    assert hit["merged"][68] == "\u0f62\u0f9f"
+    assert hit["merged"][105] == "\u0f42\u0fb2"
+    assert hit["merged"][166] == "\u0f74"
+    text = _patched_text(DZONGKHA)
+    assert "\u0f50\u0f7c\u0f51\u0f0b\u0f54\u0f0b\u0f56\u0f5f\u0f44\u0f0b\u0f44\u0f53\u0f0b\u0f56\u0f62\u0f9f\u0f42\u0f66\u0f0b\u0f50\u0f56\u0f66" in text
+    assert "\u0f51\u0f44\u0f7c\u0f66\u0f0b\u0f42\u0fb2\u0f74\u0f56" in text
+    assert "\u0f66\u0fa4\u0fb1\u0f72\u0f62" in text
+    assert "\u0f56\u0f9f\u0f42\u0f66" not in text
+    assert "\u00a6" not in text
+    assert "\u20ab" not in text
+
+
+@pytest.mark.skipif(not MSTT.is_file(), reason="MSTT Dagpo excerpt not present")
+def test_mstt_excerpt_uses_pdf_byte_reviewed_table() -> None:
+    recs = _records(MSTT)
+    hit = next(r for r in recs if r.get("db_name_matched") == "MSTT31c37a")
+    assert hit["changed"] > 100
+    assert hit["merged"][49] == "\u0f21"
+    assert hit["merged"][124] == "\u0f11"
+    assert hit["merged"][251] == "\u0f14"
+    text = _patched_text(MSTT)
+    assert "\u0f04\u0f05\u0f0d \u0f0d\u0f62\u0f97\u0f7a\u0f0b\u0f56\u0f59\u0f74\u0f53" in text
+
+
+@pytest.mark.skipif(not CHENREZIG.is_file(), reason="ChosGyal excerpt not present")
+def test_chosgyal_is_left_unmodified_until_pdf_bytes_are_reviewed() -> None:
+    recs = _records(CHENREZIG)
+    unsafe = [
+        r
+        for r in recs
+        if "TibetanChosGyal" in (r.get("pdf_font_name") or "")
+        or "TibetanMangala-Normal" in (r.get("pdf_font_name") or "")
+    ]
+    assert all(not r.get("db_name_matched") and not r.get("changed") for r in unsafe)

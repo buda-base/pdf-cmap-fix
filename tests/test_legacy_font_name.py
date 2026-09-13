@@ -54,28 +54,44 @@ def test_table_for_tcrc_youtso_normal_still_resolves() -> None:
     assert table is not None
 
 
-def test_aliases_ttyoutso_bold_tcrc_and_chosgyal() -> None:
-    assert normalize_font_name("TB-TTYoutso-Bold") == "TB-Youtso"
-    assert normalize_font_name("TB2-TTYoutso-Bold") == "TB2-Youtso"
+def test_reviewed_ttyoutso_bold_tables_and_tcrc_aliases() -> None:
+    assert normalize_font_name("TB-TTYoutso-Bold") == "TB-TTYoutso-Bold"
+    assert normalize_font_name("TB2-TTYoutso-Bold") == "TB2-TTYoutso-Bold"
     assert normalize_font_name("TCRCYoutso") == "TCRC Youtso"
     assert normalize_font_name("TCRC-Bod-Yig") == "TCRC Bod-Yig"
-    assert normalize_font_name("TibetanChosGyalSkt2") == "TibetanChogyalSkt2"
     name, table = table_for("TB-TTYoutso-Bold")
-    assert name == "TB-Youtso"
+    assert name == "TB-TTYoutso-Bold"
     assert table is not None
     assert table["<"] == "\u0f40\u0fb1"
+    assert table[chr(164)] == "\u0f58"
+    assert table[chr(184)] == "\u0f5f"
+    name2, table2 = table_for("TB2-TTYoutso-Bold")
+    assert name2 == "TB2-TTYoutso-Bold"
+    assert table2 is not None
+    assert table2["D"] == "\u0f50"
     name_c, table_c = table_for("TCRCYoutso")
     assert name_c == "TCRC Youtso"
     assert table_c is not None
-    name_s, table_s = table_for("TibetanChosGyalSkt1")
-    assert name_s == "TibetanChogyalSkt1"
-    assert table_s is not None
+
+
+def test_chosgyal_is_not_aliased_to_differently_encoded_chogyal() -> None:
+    assert normalize_font_name("TibetanChosGyalSkt2") == "TibetanChosGyalSkt2"
+    assert table_for("TibetanChosGyalSkt1") == (None, None)
+
+
+def test_dzongkha_calligraphic_alias() -> None:
     assert normalize_font_name("DzongkhaCalligraphic") == "TibetanCalligraphic"
     assert normalize_font_name("DzongkhaCalligraphicSkt2") == "TibetanCalligraphicSkt2"
     name_d, table_d = table_for("DzongkhaCalligraphic")
     assert name_d == "TibetanCalligraphic"
     assert table_d is not None
     assert table_d["!"] == "\u0f40"
+    # Precomposed stacks, not attu's isolated subjoined letters.
+    assert table_d["D"] == "\u0f62\u0f9f"
+    assert table_d["i"] == "\u0f42\u0fb2"
+    assert table_d["e"] == "\u0f56\u0fb1"
+    assert table_d[chr(166)] == "\u0f74"
+    assert table_d[chr(8363)] == "\u0f66\u0fa4\u0fb1"
 
 
 def test_identify_candidates_corrupt_cmap_returns_empty() -> None:

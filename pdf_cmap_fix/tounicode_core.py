@@ -1504,6 +1504,13 @@ def _legacy_tounicode_from_scratch(
     if hg.is_huaguang_font(basename):
         return None
 
+    # These Chenrezig-era CFF subsets advertise Mangala / ChosGyal glyph
+    # names, but the PDF bytes render different outlines. Neither the nominal
+    # Mangala table nor Chogyal shape matching is a valid encoding map. Leave
+    # them untouched until a table has been reviewed from PDF-byte replay.
+    if "TibetanChosGyal" in basename or "TibetanMangala-Normal" in basename:
+        return None
+
     # Resolve the per-font conversion table: by name first, else by hashing the
     # embedded outlines (handles obfuscated PostScript names). Non-legacy faces
     # resolve to neither and bail out.
@@ -1547,7 +1554,7 @@ def _legacy_tounicode_from_scratch(
     db_map: dict[int, str] = {}
 
     # Encoding route (simple fonts only -- Type0 uses a CMap, not /Encoding).
-    if not is_type0:
+    if not is_type0 and not basename.startswith("MSTT"):
         encoding = resolve_simple_encoding(doc, xref)
         if encoding:
             from fontTools.agl import toUnicode
@@ -1598,8 +1605,11 @@ def _legacy_tounicode_from_scratch(
 
     # Last: encoding *byte* as table key. Mangala / Chogyal Type1 names
     # (``short_rta``, …) have no AGL char; the table is still keyed on the
-    # slot. Run after outlines/shapes so a Latin byte (``(`` → ཆ) cannot
-    # beat a real stack recovered from the glyph.
+    # slot. MSTT's PFA built-in Gxx encoding also uses the raw byte: treating
+    # its sparse PDF /Differences as StandardEncoding would turn e.g. byte
+    # 251 into AGL 223 and select an unrelated reviewed row.
+    # Run after outlines/shapes so a Latin byte (``(`` → ཆ) cannot beat a
+    # real stack recovered from the glyph.
     if not is_type0:
         encoding = resolve_simple_encoding(doc, xref) or {}
         for code, _gname in encoding.items():
