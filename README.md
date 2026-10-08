@@ -2,8 +2,9 @@
 
 Fix incorrect or incomplete PDF `/ToUnicode` CMaps so that text extraction, search, and copy-paste return correct Unicode.
 
+Similar issue in Hindi: https://digitalorientalist.com/2025/12/02/why-extracting-hindi-text-from-pdfs-is-so-much-harder-than-english-and-how-you-can-do-it/
+
 Primary use case: **Tibetan stacked syllables** (Monlam, Himalaya, Jomolhari fonts) in Type0 / CID / Identity-H PDFs, and **Type1 / TrueType simple-encoding** PDFs (e.g. YesheDe) since v0.4.  
-**GitHub:** [OpenPecha/pdf-cmap-fix](https://github.com/OpenPecha/pdf-cmap-fix)
 
 ---
 
