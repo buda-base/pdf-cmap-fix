@@ -36,17 +36,24 @@ def patch_doc(
     *,
     font_lookup_dir: Optional[Path] = None,
     verbose: bool = False,
+    actualtext: _core.ActualTextMode = "keep",
 ) -> dict[str, int]:
     lookup_dir = (
         Path(font_lookup_dir).expanduser().resolve()
         if font_lookup_dir is not None
         else FONT_LOOKUP_GNAME_DIR.resolve()
     )
-    return _core.patch_doc(doc, lookup_dir=lookup_dir, tier=_TIER, verbose=verbose)
+    return _core.patch_doc(
+        doc,
+        lookup_dir=lookup_dir,
+        tier=_TIER,
+        verbose=verbose,
+        actualtext=actualtext,
+    )
 
 
-def extract_all(doc: fitz.Document) -> str:
-    return _core.extract_all(doc)
+def extract_all(doc: fitz.Document, *, ignore_actualtext: bool = False) -> str:
+    return _core.extract_all(doc, ignore_actualtext=ignore_actualtext)
 
 
 def build_tounicode_dict(
@@ -69,6 +76,7 @@ def patch_pdf(
     *,
     font_lookup_dir: Optional[Path] = None,
     verbose: bool = False,
+    actualtext: _core.ActualTextMode = "keep",
 ) -> dict:
     lookup_dir = (
         Path(font_lookup_dir).expanduser().resolve()
@@ -82,6 +90,7 @@ def patch_pdf(
         lookup_dir=lookup_dir,
         tier=_TIER,
         verbose=verbose,
+        actualtext=actualtext,
     )
 
 
@@ -92,6 +101,7 @@ def extract_pdf_text(
     *,
     font_lookup_dir: Optional[Path] = None,
     verbose: bool = False,
+    actualtext: _core.ActualTextMode = "keep",
 ) -> dict:
     lookup_dir = (
         Path(font_lookup_dir).expanduser().resolve()
@@ -105,6 +115,7 @@ def extract_pdf_text(
         lookup_dir=lookup_dir,
         tier=_TIER,
         verbose=verbose,
+        actualtext=actualtext,
     )
 
 
@@ -112,6 +123,7 @@ USAGE = (
     "Usage:\n"
     "  pdf-cmap-fix-gname [--font-lookup-dir DIR] <pdf1> [pdf2] ...\n"
     "      glyph-name → Unicode lookups from DIR (default: pdf_cmap_fix/data/font_lookup_gname)\n"
+    "  pdf-cmap-fix-gname [--actualtext keep|auto|strip] <pdf> ...\n"
     "  pdf-cmap-fix-gname [--font-lookup-dir DIR] --patch-pdf <pdf> ...\n"
     "  pdf-cmap-fix-gname [--font-lookup-dir DIR] --dump-cmap OUT.json <pdf> ...\n"
 )

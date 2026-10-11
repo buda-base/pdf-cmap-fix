@@ -48,6 +48,14 @@ pdf-cmap-fix document.pdf
 # Write a patched PDF
 pdf-cmap-fix -p document.pdf
 
+# Detect document-wide corrupt /ActualText after CMap repair and strip it only
+# when it causes an overwhelming excess of repeated Tibetan combining marks
+pdf-cmap-fix --actualtext auto -p document.pdf
+
+# Explicit overrides (the default is keep)
+pdf-cmap-fix --actualtext keep -p document.pdf
+pdf-cmap-fix --actualtext strip -p document.pdf
+
 # Dump the merged ToUnicode maps as JSON (no rewrite)
 pdf-cmap-fix --dump-cmap document.cmap-dump.json document.pdf
 
@@ -124,6 +132,7 @@ from pdf_cmap_fix import extract_pdf_text, patch_pdf, build_tounicode_dict
 # Tier 1 (gid) — default: pdf_cmap_fix/data/font_lookup/
 result = extract_pdf_text("document.pdf")
 patch_pdf("document.pdf")
+patch_pdf("document.pdf", actualtext="auto")
 cmap = build_tounicode_dict("document.pdf")
 result = extract_pdf_text("document.pdf", font_lookup_dir="path/to/font_lookup")
 
@@ -143,6 +152,14 @@ extract_pdf_text("document.pdf", font_lookup_dir="path/to/font_lookup_gid_pua_fr
 extract_gname("document.pdf", font_lookup_dir="path/to/font_lookup_gname_pua_free")
 extract_gshape("document.pdf", font_lookup_dir="path/to/font_lookup_gshape_pua_free")
 ```
+
+`actualtext="keep"` is the default. `"auto"` compares extraction with and
+without `/ActualText` after CMap repair and strips wrappers only when a trusted
+CMap produces a large, overwhelming reduction in repeated Tibetan combining
+marks; it strips only wrappers whose replacement text contains Tibetan, leaving
+unrelated Latin ligature metadata intact. `"strip"` is an explicit all-language
+override. Actually painted doubled vowels are preserved because removing
+`/ActualText` does not remove glyph drawing operators.
 
 ---
 

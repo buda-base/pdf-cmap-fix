@@ -20,6 +20,7 @@ from pdf_cmap_fix.content_streams import collect_referenced_gids
 from pdf_cmap_fix.pdf_font_encoding import resolve_simple_encoding
 
 LookupTier = Literal["gid", "gname", "gshape"]
+ActualTextMode = Literal["keep", "auto", "strip"]
 StrategySpec = tuple[LookupTier, Path]
 
 # Word PDFs may emit these Type0 GIDs before stack syllables; they are not
@@ -43,9 +44,26 @@ MIN_GID_CONFLICTS = 4
 #
 # We preserve the inner drawing operators and only remove the BDC/EMC wrapper.
 _WORD_ACTUALTEXT_SENTINEL_RE = re.compile(
-    rb"/Span\s*<<.*?/ActualText\s*<\s*FEFFFFFD\s*>.*?>>\s*BDC\s*(.*?)\s*EMC",
+    rb"/[A-Za-z0-9_.-]+\s*"
+    rb"<<(?:(?!>>)[\s\S])*?/ActualText\s*<\s*FEFFFFFD\s*>"
+    rb"(?:(?!>>)[\s\S])*?>>\s*BDC\s*(.*?)\s*EMC",
     re.IGNORECASE | re.DOTALL,
 )
+
+# Conservative parser for the common inline-property ActualText form. The
+# tempered property-dictionary matches prevent one span from consuming later
+# dictionaries. Nested marked content is deliberately left untouched.
+_ACTUALTEXT_WRAPPER_RE = re.compile(
+    rb"/[A-Za-z0-9_.-]+\s*"
+    rb"<<(?:(?!>>)[\s\S])*?/ActualText\s*"
+    rb"(?P<actual><\s*[0-9A-Fa-f\s]*\s*>|\((?:\\.|[^\\)])*\))"
+    rb"(?:(?!>>)[\s\S])*?>>\s*BDC\s*"
+    rb"(?P<body>.*?)\s*EMC",
+    re.IGNORECASE | re.DOTALL,
+)
+
+AUTO_ACTUALTEXT_MIN_EXCESS = 100
+AUTO_ACTUALTEXT_MIN_RATIO = 10
 
 # Explicit Unicode glyph names: uniXXXX, uniXXXXYYYY (AGL ligature groups),
 # or uXXXX / uXXXXX / uXXXXXX. Used when a simple TrueType subset has no
@@ -712,17 +730,23 @@ def _pick_db_map_via_index(
     name_index: dict,
     pdf_norm_candidates: list[str],
     referenced: set,
+    existing: dict[int, str],
 ) -> Tuple[Optional[dict[int, str]], Optional[str], str, Optional[str]]:
     """Index-based match. Returns ``(db_map, font_id, match_kind, matched_name)``.
 
-    Among the font IDs a name resolves to, the one whose lookup covers the most
-    referenced GIDs wins (ties broken by larger overall coverage), so a richer
-    face (e.g. the 1036-glyph release) beats a sparse one sharing the same name.
+    For same-named GID maps, first prefer the release whose entries agree with
+    the PDF's existing Tibetan ToUnicode map. Font names are reused across
+    releases with incompatible glyph orders, so referenced-GID coverage alone
+    cannot distinguish them. Remaining ties prefer referenced-code coverage and
+    then total coverage, preserving the historical behaviour when the existing
+    map provides no Tibetan evidence.
     """
     matched_name, cand_ids = _resolve_index_font_ids(name_index, pdf_norm_candidates)
     if not cand_ids:
         return None, None, "", None
-    best: Optional[tuple[tuple[int, int], str, str, dict[int, str]]] = None
+    best: Optional[
+        tuple[tuple[int, int, int, int], str, str, dict[int, str]]
+    ] = None
     for cid in cand_ids:
         path = lookup_dir / f"{cid}.json"
         if not path.is_file():
@@ -735,7 +759,12 @@ def _pick_db_map_via_index(
         if not cand_map:
             continue
         overlap = len(cand_map.keys() & referenced) if referenced else 0
-        score = (overlap, len(cand_map))
+        corroborated = conflicts = 0
+        if match_kind == "gid":
+            corroborated, conflicts = _gid_map_evidence(
+                existing, cand_map, referenced
+            )
+        score = (corroborated, -conflicts, overlap, len(cand_map))
         if best is None or score > best[0]:
             best = (score, cid, match_kind, cand_map)
     if best is None:
@@ -1137,6 +1166,26 @@ def _huaguang_tounicode(
     return None
 
 
+def _gid_map_evidence(
+    existing: dict,
+    db_map: dict,
+    referenced: Optional[set] = None,
+) -> tuple[int, int]:
+    """Return Tibetan ``(corroborations, conflicts)`` for a GID map."""
+    codes = (db_map.keys() & referenced) if referenced else db_map.keys()
+    corroborated = conflicts = 0
+    for code in codes:
+        old = existing.get(code, "")
+        if not _is_tibetan_text(old):
+            continue
+        new = db_map[code]
+        if new == old or new.startswith(old):
+            corroborated += 1
+        else:
+            conflicts += 1
+    return corroborated, conflicts
+
+
 def _gid_map_corroborated(
     existing: dict,
     db_map: dict,
@@ -1168,17 +1217,7 @@ def _gid_map_corroborated(
     the check inert for legacy fonts (their existing entries are Latin and are
     skipped outright) and for thin evidence.
     """
-    codes = (db_map.keys() & referenced) if referenced else db_map.keys()
-    corroborated = conflicts = 0
-    for code in codes:
-        old = existing.get(code, "")
-        if not _is_tibetan_text(old):
-            continue
-        new = db_map[code]
-        if new == old or new.startswith(old):
-            corroborated += 1
-        else:
-            conflicts += 1
+    corroborated, conflicts = _gid_map_evidence(existing, db_map, referenced)
     return not (corroborated == 0 and conflicts >= min_conflicts)
 
 
@@ -1909,6 +1948,7 @@ def collect_font_merges(
                     name_index=name_index,
                     pdf_norm_candidates=pdf_norm_candidates,
                     referenced=referenced,
+                    existing=existing,
                 )
             elif db_map is None:
                 picked = None
@@ -2086,37 +2126,147 @@ def _strip_word_actualtext_sentinels_in_stream(
 
 
 def strip_word_actualtext_sentinels(doc: fitz.Document) -> dict[str, int]:
-    """Strip Word FEFF/FFFD ActualText wrappers across page content streams."""
-    seen_stream_xrefs: set[int] = set()
+    """Strip Word FEFF/FFFD ActualText wrappers from content and Form streams."""
     markers_removed = 0
     streams_changed = 0
-    for pno in range(len(doc)):
-        page = doc[pno]
+    for xref in range(1, doc.xref_length()):
         try:
-            content_xrefs = page.get_contents()
+            stream = doc.xref_stream(xref)
         except Exception:
             continue
-        for xref in content_xrefs:
-            if xref in seen_stream_xrefs:
-                continue
-            seen_stream_xrefs.add(xref)
-            try:
-                stream = doc.xref_stream(xref)
-            except Exception:
-                continue
-            new_stream, n = _strip_word_actualtext_sentinels_in_stream(stream)
-            if n <= 0:
-                continue
-            try:
-                doc.update_stream(xref, new_stream)
-            except Exception:
-                continue
-            markers_removed += n
-            streams_changed += 1
+        if not stream or b"ActualText" not in stream:
+            continue
+        new_stream, n = _strip_word_actualtext_sentinels_in_stream(stream)
+        if n <= 0:
+            continue
+        try:
+            doc.update_stream(xref, new_stream)
+        except Exception:
+            continue
+        markers_removed += n
+        streams_changed += 1
     return dict(
         actualtext_removed=markers_removed,
         actualtext_streams_changed=streams_changed,
     )
+
+
+def _strip_actualtext_wrappers_in_stream(
+    stream: bytes, *, tibetan_only: bool = False
+) -> tuple[bytes, int]:
+    """Strip non-nested inline ActualText wrappers, preserving drawing operators."""
+    if not stream:
+        return stream, 0
+    removed = 0
+
+    def replace(match: re.Match[bytes]) -> bytes:
+        nonlocal removed
+        body = match.group("body")
+        if tibetan_only:
+            encoded = match.group("actual")
+            if not encoded.startswith(b"<"):
+                return match.group(0)
+            try:
+                actual = _hex_to_unicode(encoded[1:-1].decode("ascii")).lstrip(
+                    "\ufeff"
+                )
+            except (UnicodeDecodeError, ValueError):
+                return match.group(0)
+            if not any(
+                TIBETAN_RANGE[0] <= ord(c) <= TIBETAN_RANGE[1]
+                for c in actual
+            ):
+                return match.group(0)
+        # Removing the nearest EMC would unbalance nested marked content.
+        if re.search(rb"/[A-Za-z0-9_.-]+\s+(?:BDC|BMC)\b", body):
+            return match.group(0)
+        removed += 1
+        return body
+
+    return _ACTUALTEXT_WRAPPER_RE.sub(replace, stream), removed
+
+
+def strip_actualtext_wrappers(
+    doc: fitz.Document, *, tibetan_only: bool = False
+) -> dict[str, int]:
+    """Strip recognised ActualText wrappers from all streams in ``doc``.
+
+    Form XObjects can be shared by hundreds of pages, so scanning only page
+    content streams is insufficient. The operator-shaped regex is specific
+    enough to leave font and image streams alone.
+    """
+    markers_removed = 0
+    streams_changed = 0
+    for xref in range(1, doc.xref_length()):
+        try:
+            stream = doc.xref_stream(xref)
+        except Exception:
+            continue
+        if not stream or b"ActualText" not in stream:
+            continue
+        new_stream, n = _strip_actualtext_wrappers_in_stream(
+            stream, tibetan_only=tibetan_only
+        )
+        if n <= 0:
+            continue
+        try:
+            doc.update_stream(xref, new_stream)
+        except Exception:
+            continue
+        markers_removed += n
+        streams_changed += 1
+    return dict(
+        actualtext_removed=markers_removed,
+        actualtext_streams_changed=streams_changed,
+    )
+
+
+def _has_actualtext(doc: fitz.Document) -> bool:
+    for xref in range(1, doc.xref_length()):
+        try:
+            stream = doc.xref_stream(xref)
+        except Exception:
+            continue
+        if stream and b"ActualText" in stream:
+            return True
+    return False
+
+
+def _count_repeated_tibetan_combining_marks(text: str) -> int:
+    """Count adjacent identical Tibetan combining signs in extracted text."""
+    return sum(
+        a == b and "\u0f71" <= a <= "\u0f84"
+        for a, b in zip(text, text[1:])
+    )
+
+
+def _actualtext_corruption_metrics(
+    honored_text: str,
+    ignored_text: str,
+    *,
+    trusted_cmap: bool,
+    min_excess: int = AUTO_ACTUALTEXT_MIN_EXCESS,
+    min_ratio: int = AUTO_ACTUALTEXT_MIN_RATIO,
+) -> dict[str, int]:
+    """Measure whether ActualText causes systematic duplicated Tibetan marks.
+
+    A handful of duplicates is intentionally inconclusive because sequences
+    such as ``བོོ`` may be legitimate. Automatic stripping requires a trusted
+    repaired CMap and an overwhelming document-level reduction.
+    """
+    honored = _count_repeated_tibetan_combining_marks(honored_text)
+    ignored = _count_repeated_tibetan_combining_marks(ignored_text)
+    excess = honored - ignored
+    detected = (
+        trusted_cmap
+        and excess >= min_excess
+        and honored >= max(min_excess, ignored * min_ratio)
+    )
+    return {
+        "actualtext_repeated_marks_honored": honored,
+        "actualtext_repeated_marks_ignored": ignored,
+        "actualtext_corrupt_detected": int(detected),
+    }
 
 
 def patch_doc(
@@ -2125,7 +2275,10 @@ def patch_doc(
     lookup_dir: Path,
     tier: LookupTier,
     verbose: bool = False,
+    actualtext: ActualTextMode = "keep",
 ) -> dict[str, int]:
+    if actualtext not in ("keep", "auto", "strip"):
+        raise ValueError(f"unknown ActualText mode: {actualtext!r}")
     records, stats = collect_font_merges(
         doc,
         lookup_dir=lookup_dir,
@@ -2136,15 +2289,48 @@ def patch_doc(
     clean_stats = strip_word_actualtext_sentinels(doc)
     stats = dict(stats)
     stats.update(clean_stats)
+    stats.update(
+        actualtext_repeated_marks_honored=0,
+        actualtext_repeated_marks_ignored=0,
+        actualtext_corrupt_detected=0,
+    )
+
+    should_strip = actualtext == "strip"
+    if actualtext == "auto" and _has_actualtext(doc):
+        honored_text = extract_all(doc)
+        ignored_text = extract_all(doc, ignore_actualtext=True)
+        trusted_cmap = any(
+            r.get("db_key_matched") is not None and bool(r.get("merged"))
+            for r in records
+        )
+        detection = _actualtext_corruption_metrics(
+            honored_text,
+            ignored_text,
+            trusted_cmap=trusted_cmap,
+        )
+        stats.update(detection)
+        should_strip = bool(detection["actualtext_corrupt_detected"])
+
+    if should_strip:
+        strip_stats = strip_actualtext_wrappers(
+            doc, tibetan_only=actualtext == "auto"
+        )
+        stats["actualtext_removed"] += strip_stats["actualtext_removed"]
+        stats["actualtext_streams_changed"] += strip_stats[
+            "actualtext_streams_changed"
+        ]
     return stats
 
 
-def extract_all(doc: fitz.Document) -> str:
+def extract_all(doc: fitz.Document, *, ignore_actualtext: bool = False) -> str:
     pages = []
+    flags = fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES
+    if ignore_actualtext:
+        flags |= fitz.TEXT_IGNORE_ACTUALTEXT
     for pno in range(len(doc)):
         text = doc[pno].get_text(
             "text",
-            flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES,
+            flags=flags,
         )
         pages.append(f"=== PAGE {pno+1} ===\n{text.strip()}")
     return "\n".join(pages)
@@ -2181,6 +2367,7 @@ def patch_pdf(
     lookup_dir: Path,
     tier: LookupTier,
     verbose: bool = False,
+    actualtext: ActualTextMode = "keep",
 ) -> dict:
     pdf_path = Path(pdf_path)
     stem = pdf_path.stem
@@ -2196,6 +2383,7 @@ def patch_pdf(
             lookup_dir=lookup_dir,
             tier=tier,
             verbose=verbose,
+            actualtext=actualtext,
         )
         pdf_bytes = doc.tobytes(**_PDF_SAVE_KW)
     finally:
@@ -2215,6 +2403,7 @@ def extract_pdf_text(
     lookup_dir: Path,
     tier: LookupTier,
     verbose: bool = False,
+    actualtext: ActualTextMode = "keep",
 ) -> dict:
     pdf_path = Path(pdf_path)
     out_dir = Path(output_dir) if output_dir else pdf_path.parent
@@ -2231,6 +2420,7 @@ def extract_pdf_text(
             lookup_dir=lookup_dir,
             tier=tier,
             verbose=verbose,
+            actualtext=actualtext,
         )
         patched_text = extract_all(doc_pat)
     finally:
@@ -2385,6 +2575,7 @@ def _select_auto_strategy(
     *,
     strategies: dict[str, StrategySpec],
     verbose: bool = True,
+    actualtext: ActualTextMode = "keep",
 ) -> tuple[str, LookupTier, Path, Optional[dict]]:
     """Pick the strategy whose patched extraction has the most Tibetan text."""
     best: Optional[tuple[tuple[int, int, int], str, LookupTier, Path, dict, dict[str, int]]] = None
@@ -2401,6 +2592,7 @@ def _select_auto_strategy(
             lookup_dir=cand_lookup,
             tier=cand_tier,
             verbose=False,
+            actualtext=actualtext,
         )
         quality = _text_quality(result["patched"])
         key = _quality_sort_key(quality)
@@ -2458,6 +2650,7 @@ def cli_main(
 
     font_lookup_cli: Optional[Path] = None
     strategy_cli: Optional[str] = "auto" if strategy_specs is not None else None
+    actualtext_mode: ActualTextMode = "keep"
     i = 0
     while i < len(argv):
         if argv[i] == "--font-lookup-dir" and i + 1 < len(argv):
@@ -2483,6 +2676,13 @@ def cli_main(
         if argv[i] == "--gshape-pua-free":
             strategy_cli = "gshape-pua-free"
             i += 1
+            continue
+        if argv[i] == "--actualtext" and i + 1 < len(argv):
+            value = argv[i + 1]
+            if value not in ("keep", "auto", "strip"):
+                sys.exit("--actualtext must be one of: keep, auto, strip")
+            actualtext_mode = value
+            i += 2
             continue
         break
     argv = argv[i:]
@@ -2561,6 +2761,7 @@ def cli_main(
                     pdf_path,
                     strategies=strategy_specs,
                     verbose=True,
+                    actualtext=actualtext_mode,
                 )
             except RuntimeError as e:
                 print(f"  SKIP ({e})", file=sys.stderr)
@@ -2599,6 +2800,7 @@ def cli_main(
                 lookup_dir=run_lookup,
                 tier=run_tier,
                 verbose=True,
+                actualtext=actualtext_mode,
             )
             stats = result["stats"]
             pdf_bytes = result["pdf_bytes"]
@@ -2610,7 +2812,13 @@ def cli_main(
             if stats.get("actualtext_removed", 0) > 0:
                 print(
                     "  stripped:      "
-                    f"{stats['actualtext_removed']} Word ActualText marker(s)"
+                    f"{stats['actualtext_removed']} ActualText marker(s)"
+                )
+            if stats.get("actualtext_corrupt_detected", 0):
+                print(
+                    "  detected:      corrupt ActualText "
+                    f"({stats['actualtext_repeated_marks_honored']} -> "
+                    f"{stats['actualtext_repeated_marks_ignored']} repeated marks)"
                 )
             print(f"  Written: {out_path}  ({len(pdf_bytes):,} bytes)")
             continue
@@ -2622,6 +2830,7 @@ def cli_main(
                 lookup_dir=run_lookup,
                 tier=run_tier,
                 verbose=True,
+                actualtext=actualtext_mode,
             )
         else:
             print(f"  strategy:      {run_strategy}")
@@ -2643,7 +2852,13 @@ def cli_main(
         if stats.get("actualtext_removed", 0) > 0:
             print(
                 "  stripped:      "
-                f"{stats['actualtext_removed']} Word ActualText marker(s)"
+                f"{stats['actualtext_removed']} ActualText marker(s)"
+            )
+        if stats.get("actualtext_corrupt_detected", 0):
+            print(
+                "  detected:      corrupt ActualText "
+                f"({stats['actualtext_repeated_marks_honored']} -> "
+                f"{stats['actualtext_repeated_marks_ignored']} repeated marks)"
             )
         print(f"  Written: {pdf_path.parent}/{stem}.{{raw,patched,diff}}.txt")
         _show_preview("PATCHED TEXT", patched_text)

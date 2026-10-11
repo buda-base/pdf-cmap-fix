@@ -43,17 +43,24 @@ def patch_doc(
     *,
     font_lookup_dir: Optional[Path] = None,
     verbose: bool = False,
+    actualtext: _core.ActualTextMode = "keep",
 ) -> dict[str, int]:
     lookup_dir = (
         Path(font_lookup_dir).expanduser().resolve()
         if font_lookup_dir is not None
         else FONT_LOOKUP_DIR.resolve()
     )
-    return _core.patch_doc(doc, lookup_dir=lookup_dir, tier=_TIER, verbose=verbose)
+    return _core.patch_doc(
+        doc,
+        lookup_dir=lookup_dir,
+        tier=_TIER,
+        verbose=verbose,
+        actualtext=actualtext,
+    )
 
 
-def extract_all(doc: fitz.Document) -> str:
-    return _core.extract_all(doc)
+def extract_all(doc: fitz.Document, *, ignore_actualtext: bool = False) -> str:
+    return _core.extract_all(doc, ignore_actualtext=ignore_actualtext)
 
 
 def build_tounicode_dict(
@@ -76,6 +83,7 @@ def patch_pdf(
     *,
     font_lookup_dir: Optional[Path] = None,
     verbose: bool = False,
+    actualtext: _core.ActualTextMode = "keep",
 ) -> dict:
     lookup_dir = (
         Path(font_lookup_dir).expanduser().resolve()
@@ -89,6 +97,7 @@ def patch_pdf(
         lookup_dir=lookup_dir,
         tier=_TIER,
         verbose=verbose,
+        actualtext=actualtext,
     )
 
 
@@ -99,6 +108,7 @@ def extract_pdf_text(
     *,
     font_lookup_dir: Optional[Path] = None,
     verbose: bool = False,
+    actualtext: _core.ActualTextMode = "keep",
 ) -> dict:
     lookup_dir = (
         Path(font_lookup_dir).expanduser().resolve()
@@ -112,6 +122,7 @@ def extract_pdf_text(
         lookup_dir=lookup_dir,
         tier=_TIER,
         verbose=verbose,
+        actualtext=actualtext,
     )
 
 
@@ -122,6 +133,8 @@ USAGE = (
     "  pdf-cmap-fix [--no-auto] [--pua-free] [--gshape] [--gshape-pua-free] <pdf1> [pdf2] ...\n"
     "  pdf-cmap-fix [--font-lookup-dir DIR] <pdf1> [pdf2] ...\n"
     "      Custom lookup dir disables auto and uses the GID tier\n"
+    "  pdf-cmap-fix [strategy options] [--actualtext keep|auto|strip] <pdf> ...\n"
+    "      keep is the default; auto strips only strongly detected corruption\n"
     "  pdf-cmap-fix [strategy options] --patch-pdf <pdf> ...\n"
     "  pdf-cmap-fix [strategy options] --dump-cmap OUT.json <pdf> ...\n"
 )

@@ -17,7 +17,7 @@ REPO = Path(__file__).resolve().parents[1]
 ISSUE16_PAGE = REPO / "tests" / "fixtures" / "issue16-page1.pdf"
 
 
-def test_auto_strategy_prefers_pua_free_for_issue16_page() -> None:
+def test_auto_strategy_produces_pua_free_text_for_issue16_page() -> None:
     specs = _default_strategy_specs(FONT_LOOKUP_DIR)
     gid_tier, gid_lookup = specs["gid"]
     baseline = extract_pdf_text(
@@ -35,10 +35,12 @@ def test_auto_strategy_prefers_pua_free_for_issue16_page() -> None:
     )
 
     assert result is not None
-    assert selected in {"gid-pua-free", "gshape", "gshape-pua-free"}
+    # Compatibility-aware same-name release selection can make the default GID
+    # result tie the explicitly PUA-free strategies.
+    assert selected in {"gid", "gid-pua-free", "gshape", "gshape-pua-free"}
     assert selected_tier in {"gid", "gshape"}
     assert selected_lookup.is_dir()
-    assert _quality_sort_key(_text_quality(result["patched"])) > _quality_sort_key(
+    assert _quality_sort_key(_text_quality(result["patched"])) >= _quality_sort_key(
         _text_quality(baseline["patched"])
     )
     assert "གང་ཐུགས་བདེ་ཆེན" in result["patched"]
