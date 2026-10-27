@@ -248,14 +248,27 @@ def test_times_decoy_stays_unconverted_with_no_tounicode() -> None:
         doc.close()
 
 
-def test_glyph_lookup_recovers_char_missing_from_direct_table() -> None:
-    # Ported pytiblegenc glyph-lookup fallback: 'Ededris-d1' has no entry for the
-    # space slot in its own conversion table, but that glyph's outline matches a
-    # sibling font where it is a subjoined-U vowel, so it is recovered.
+def test_glyph_lookup_rejects_ambiguous_empty_glyph_hash() -> None:
+    # The old glyph DB gives every empty glyph named "visiblespace" the same
+    # name-derived hash. Its sibling tables disagree (space, U, long-A, and
+    # long-A+U), so selecting the first candidate would invent a character.
     from pdf_cmap_fix import pytiblegenc_tables as ptg
 
     assert " " not in ptg._base().get("Ededris-d1", {})
-    assert ptg.convert_char("Ededris-d1", " ") == "\u0f74"
+    assert ptg.convert_char("Ededris-d1", " ") is None
+
+
+def test_dedris_vowa_nbsp_is_explicitly_a_space() -> None:
+    from pdf_cmap_fix import pytiblegenc_tables as ptg
+
+    # This positive-width empty glyph is U+00A0 in the PDF's original
+    # ToUnicode map. Keep it as spacing without consulting sibling hashes.
+    assert ptg.convert_char("Ededris-vowa", "\u00a0") == " "
+
+
+def test_direct_table_hit_still_resolves() -> None:
+    from pdf_cmap_fix import pytiblegenc_tables as ptg
+
     # A direct table hit still resolves without the fallback.
     assert ptg.convert_char("Ededris-a", "!") == "\u0f40"
 

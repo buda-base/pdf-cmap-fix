@@ -185,8 +185,11 @@ def _glyph_lookup_recover(font_name: str, ch: str) -> Optional[str]:
 
     When ``ch`` is absent from ``font_name``'s table, find the glyph at
     ``ord(ch)`` in that font (via the glyph DB) and borrow the mapping of a
-    *sibling* font whose glyph has the same outline hash. Returns the recovered
-    Unicode string, or ``None``.
+    *sibling* font whose glyph has the same outline hash. Recovery is only safe
+    when every mapped sibling agrees: old glyph DB entries for empty glyphs use
+    name-derived hashes, so visually identical blanks can intentionally carry
+    different semantics in layered fonts. Returns the unambiguous Unicode
+    string, or ``None``.
     """
     from pdf_cmap_fix.glyph_outline_id import glyph_lookup_tables
 
@@ -195,15 +198,17 @@ def _glyph_lookup_recover(font_name: str, ch: str) -> Optional[str]:
     if not glyph_hash:
         return None
     base = _base()
-    # Deterministic order (the source uses an unordered set).
-    for cand_font, cand_cp in sorted(reverse.get(glyph_hash, frozenset())):
+    values: set[str] = set()
+    for cand_font, cand_cp in reverse.get(glyph_hash, frozenset()):
         cand_table = base.get(cand_font)
         if cand_table is None:
             continue
         value = cand_table.get(chr(cand_cp))
         if value is not None and value != ERROR_CHR and value != "":
-            return value
-    return None
+            values.add(value)
+            if len(values) > 1:
+                return None
+    return next(iter(values), None)
 
 
 def convert_char(font_name: str, ch: str) -> Optional[str]:
